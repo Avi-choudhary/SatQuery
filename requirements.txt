@@ -1,0 +1,33 @@
+# ================================================================
+# SatQuery AI - Unified Platform Requirements
+# SIH 2026 / ISRO PS 26167
+# Compatible Runtime: Python 3.13 (Windows AMD64 + CUDA 12.8)
+# ================================================================
+
+# 1. API & Central Backend Server
+fastapi>=0.110.0
+uvicorn>=0.28.0
+pydantic>=2.0.0
+python-multipart>=0.0.9
+requests>=2.31.0
+httpx>=0.28.1
+
+# 2. GIS & Remote Sensing Pre-processing Engine
+rasterio>=1.5.0
+scipy>=1.15.0
+numpy>=2.0.0
+pillow>=10.0.0
+affine>=3.0.0
+
+# 3. Vision-Language Deep Learning Models (Qwen3-VL-2B-SatQuery)
+# To install with CUDA 12.8:
+# pip install torch torchvision --index-url https://download.pytorch.org/whl/cu128
+torch>=2.11.0
+torchvision>=0.26.0
+transformers>=5.16.0
+accelerate>=1.14.0
+peft>=0.20.0
+bitsandbytes>=0.50.0
+safetensors>=0.8.0
+psutil>=6.0.0
+tifffile>=2024.0.0

@@ -1,0 +1,193 @@
+# ==============================================================================
+# SatQuery AI - Comprehensive Git Ignore
+# Covers: Python (FastAPI/PyTorch), Node/Vite, GIS/GeoTIFFs, Model Checkpoints,
+#         Datasets, Environment Secrets, OS Metadata, and Temporary Files.
+# ==============================================================================
+
+# ------------------------------------------------------------------------------
+# 1. Virtual Environments & Package Managers
+# ------------------------------------------------------------------------------
+.venv/
+*/.venv/
+**/venv/
+venv/
+env/
+ENV/
+changeformer_env/
+**/changeformer_env/
+env.bak/
+venv.bak/
+
+# ------------------------------------------------------------------------------
+# 2. Python Bytecode, Caches & Compilations
+# ------------------------------------------------------------------------------
+__pycache__/
+**/__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.pyd
+
+# Testing & Linting Caches
+.pytest_cache/
+**/.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.mypy_cache/
+**/.mypy_cache/
+.ruff_cache/
+**/.ruff_cache/
+.hypothesis/
+
+# Packaging & Distribution
+build/
+dist/
+*.egg-info/
+**/*.egg-info/
+.eggs/
+eggs/
+parts/
+var/
+sdist/
+develop-eggs/
+.installed.cfg
+*.manifest
+*.spec
+
+# ------------------------------------------------------------------------------
+# 3. Frontend / Node.js (Vite + React)
+# ------------------------------------------------------------------------------
+node_modules/
+**/node_modules/
+frontend/dist/
+frontend/build/
+.pnp
+.pnp.js
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+.eslintcache
+
+# ------------------------------------------------------------------------------
+# 4. Large Machine Learning Models & Weights (Exceeds GitHub 100MB limit)
+# ------------------------------------------------------------------------------
+*.safetensors
+*.pth
+*.pt
+*.bin
+*.ckpt
+*.onnx
+*.h5
+*.hdf5
+*.pkl
+*.pickle
+*.joblib
+
+# Model training outputs and checkpoint directories
+Model Training/output/*
+!Model Training/output/.gitkeep
+**/checkpoints/*
+!**/checkpoints/.gitkeep
+
+# HuggingFace & Torch Hub Caches
+.cache/
+**/.cache/
+huggingface/
+
+# ------------------------------------------------------------------------------
+# 5. Datasets, GIS Rasters & Heavy Data
+# ------------------------------------------------------------------------------
+# Satellite Rasters & GIS Imagery
+*.tif
+*.tiff
+*.geotiff
+*.img
+*.nc
+*.nc4
+
+# Heavy Tabular & Vector Data
+*.parquet
+*.feather
+*.arrow
+
+# GIS Extraction Data Directories
+gis_extraction_logic/data/raw/*
+!gis_extraction_logic/data/raw/.gitkeep
+gis_extraction_logic/data/interim/*
+!gis_extraction_logic/data/interim/.gitkeep
+gis_extraction_logic/data/processed/*
+!gis_extraction_logic/data/processed/.gitkeep
+
+# Model Training Datasets & Image Dumps
+Model Training/data/*
+!Model Training/data/.gitkeep
+
+# ------------------------------------------------------------------------------
+# 6. Temporary Uploads, Scratch & Runtime Outputs
+# ------------------------------------------------------------------------------
+temp_uploads/*
+!temp_uploads/.gitkeep
+**/temp_uploads/*
+!**/temp_uploads/.gitkeep
+**/temp_changeformer/*
+!**/temp_changeformer/.gitkeep
+**/outputs/*
+!**/outputs/.gitkeep
+scratch/
+
+# ------------------------------------------------------------------------------
+# 7. Environment Variables, Secrets & Credentials
+# ------------------------------------------------------------------------------
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.cert
+*.crt
+*.p12
+*.pfx
+credentials.json
+service_account*.json
+token.json
+
+# ------------------------------------------------------------------------------
+# 8. Operating System & IDE Files
+# ------------------------------------------------------------------------------
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+__MACOSX/
+**/__MACOSX/
+
+# Windows
+Thumbs.db
+Thumbs.db:encryptable
+ehthumbs.db
+ehthumbs_vista.db
+*.stackdump
+[Dd]esktop.ini
+
+# IDEs & Editors
+.vscode/*
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/extensions.json
+.idea/
+*.sublime-project
+*.sublime-workspace
+*.swp
+*.swo
+*~
+
+# ------------------------------------------------------------------------------
+# 9. Logs & Runtime Dumps
+# ------------------------------------------------------------------------------
+*.log
+logs/
+*.pid
+*.seed
