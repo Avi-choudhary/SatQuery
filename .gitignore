@@ -127,15 +127,17 @@ Model Training/data/*
 # ------------------------------------------------------------------------------
 # 6. Temporary Uploads, Scratch & Runtime Outputs
 # ------------------------------------------------------------------------------
-temp_uploads/*
-!temp_uploads/.gitkeep
-**/temp_uploads/*
-!**/temp_uploads/.gitkeep
-**/temp_changeformer/*
-!**/temp_changeformer/.gitkeep
+temp_uploads/
+**/temp_uploads/
+**/temp_changeformer/
 **/outputs/*
 !**/outputs/.gitkeep
 scratch/
+
+# Batch & Local Scripts
+*.bat
+*.cmd
+
 
 # ------------------------------------------------------------------------------
 # 7. Environment Variables, Secrets & Credentials

@@ -30,8 +30,7 @@ SatQuery/
 │           ├── core/             # Application config and lifecycle
 │           ├── schemas/          # Pydantic request/response schemas
 │           ├── services/         # Agentic routing, VLM caller, ChangeFormer hook
-│           ├── utils/            # GIS pre-processing and GeoJSON utilities
-│           └── temp_uploads/     # Temporary file ingestion (git-ignored)
+│           └── utils/            # GIS pre-processing and GeoJSON utilities
 │
 ├── frontend/                     # React 19 + TypeScript + Vite Web Console
 │   ├── src/
@@ -59,9 +58,7 @@ SatQuery/
 │   └── test_full_stack_verification.py
 │
 ├── requirements.txt              # Unified Python dependencies (CUDA 12.8 compatible)
-├── run_local.bat                 # 1-Click full-stack launcher (Desktop PC mode)
-├── run_laptop.bat                # 1-Click frontend + backend launcher (Remote GPU mode)
-└── start_gpu_host.bat            # 1-Click GPU inference host launcher
+└── .env.example                  # Environment configuration template
 ```
 
 ---
@@ -122,24 +119,20 @@ cd ..
 
 ## ⚡ Running the Platform
 
-We provide convenient batch scripts for multi-modal orchestration:
-
-| Launcher Script | Description |
-| :--- | :--- |
-| `run_local.bat` | Starts the **FastAPI backend** (:8000), launches the **Vite frontend** (:5173), and auto-opens `http://localhost:5173/console` on a single PC. |
-| `run_laptop.bat` | Starts the backend and frontend configured to route GPU inference calls to a remote GPU host. |
-| `start_gpu_host.bat` | Starts the dedicated **Qwen3-VL GPU inference host** on a machine equipped with high-VRAM NVIDIA GPUs. |
-
-Alternatively, start services individually:
+Run services individually in dedicated terminals:
 
 ```bash
-# Terminal 1: Backend
+# Terminal 1: Central FastAPI Backend
 cd backend/SatQuery-master/backend
 uvicorn main:app --host 0.0.0.0 --port 8000 --reload
 
-# Terminal 2: Frontend
+# Terminal 2: React Vite Frontend Console
 cd frontend
 npm run dev
+
+# Terminal 3 (Optional): Dedicated Local GPU Model Inference Host
+cd "Model Training"
+python run_gpu_host.py
 ```
 
 ---
