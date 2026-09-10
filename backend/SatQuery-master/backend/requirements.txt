@@ -2,3 +2,15 @@ fastapi
 uvicorn
 pydantic
 python-multipart
+
+numpy
+rasterio
+pyproj
+scipy
+
+sqlalchemy>=2.0.0
+alembic
+bcrypt
+pyjwt
+email-validator
+psycopg2-binary
