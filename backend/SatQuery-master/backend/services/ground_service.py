@@ -85,6 +85,7 @@ async def run_inference(query: str, file_paths: List[str], tracer: Tracer) -> Tu
         text_answer = synthesize_conversational_response(
             query=query,
             raw_answer=raw_answer,
+            scene_landcover=res.get("scene_landcover"),
             detections=detections,
             wgs84_bounds=res.get("wgs84_bbox")
         )

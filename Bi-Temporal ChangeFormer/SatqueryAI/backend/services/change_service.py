@@ -14,6 +14,23 @@ from rasterio.transform import Affine
 from rasterio.warp import Resampling, calculate_default_transform, reproject
 from pyproj import CRS, Transformer
 
+# change_service is loaded by path via importlib from the root backend, so a
+# plain `from . import irmad` has no package context to resolve against.
+import importlib.util as _importlib_util
+
+_IRMAD_PATH = Path(__file__).resolve().parent / "irmad.py"
+try:
+    _spec = _importlib_util.spec_from_file_location("satquery_irmad", _IRMAD_PATH)
+    irmad_module = _importlib_util.module_from_spec(_spec)
+    import sys as _sys
+    _sys.modules["satquery_irmad"] = irmad_module  # dataclass needs this
+    _spec.loader.exec_module(irmad_module)
+except Exception as _irmad_exc:  # pragma: no cover - optional dependency path
+    irmad_module = None
+    _IRMAD_IMPORT_ERROR = _irmad_exc
+else:
+    _IRMAD_IMPORT_ERROR = None
+
 
 # =============================================================================
 # Configuration
@@ -1916,6 +1933,81 @@ def _save_geojson(
 # Evidence raster
 # =============================================================================
 
+def _save_mask_web_overlay(
+    changed: np.ndarray,
+    valid: np.ndarray,
+    transform: Affine,
+    crs: CRS,
+    output_path: Path,
+) -> Optional[Dict[str, Any]]:
+    """
+    Write the change mask as an RGBA PNG warped to Web Mercator.
+
+    The pipeline already saves a GeoTIFF mask, but a browser cannot draw one.
+    Warping to EPSG:3857 here means the PNG can be handed straight to a slippy
+    map as an image overlay and land on the right ground at every zoom, which
+    stretching a native-CRS render across a lat/lon box does not.
+
+    Returns the placement metadata, or None if the warp fails.
+    """
+    try:
+        from PIL import Image
+
+        height, width = changed.shape
+
+        # Red where changed, transparent everywhere else — including invalid
+        # pixels, so the nodata skirt never paints over the basemap.
+        rgba = np.zeros((height, width, 4), dtype=np.uint8)
+        hit = changed & valid
+        rgba[..., 0][hit] = 255
+        rgba[..., 1][hit] = 59
+        rgba[..., 2][hit] = 48
+        rgba[..., 3][hit] = 190
+
+        dst_transform, dst_width, dst_height = calculate_default_transform(
+            crs, "EPSG:3857", width, height, *rasterio.transform.array_bounds(
+                height, width, transform
+            )
+        )
+
+        warped = np.zeros((4, dst_height, dst_width), dtype=np.uint8)
+        for band in range(4):
+            reproject(
+                source=rgba[..., band],
+                destination=warped[band],
+                src_transform=transform,
+                src_crs=crs,
+                dst_transform=dst_transform,
+                dst_crs="EPSG:3857",
+                resampling=Resampling.nearest,
+            )
+
+        Image.fromarray(
+            np.transpose(warped, (1, 2, 0)), mode="RGBA"
+        ).save(str(output_path), "PNG")
+
+        left, top = dst_transform * (0, 0)
+        right, bottom = dst_transform * (dst_width, dst_height)
+        transformer = Transformer.from_crs("EPSG:3857", "EPSG:4326", always_xy=True)
+        min_lon, min_lat = transformer.transform(left, bottom)
+        max_lon, max_lat = transformer.transform(right, top)
+
+        return {
+            "wgs84_bounds": [
+                round(float(min_lon), 8),
+                round(float(min_lat), 8),
+                round(float(max_lon), 8),
+                round(float(max_lat), 8),
+            ],
+            "width": int(dst_width),
+            "height": int(dst_height),
+        }
+
+    except Exception as exc:
+        print(f"[Change overlay warning]: {type(exc).__name__}: {exc}")
+        return None
+
+
 def _save_mask_raster(
     mask: np.ndarray,
     transform: Affine,
@@ -2390,19 +2482,66 @@ def _analyse_pair(
 
         else:
 
-            magnitude = _cva_change(
-               first_data,
-               second_data,
-               valid,
-            )
+            # Optical pair: prefer IR-MAD.
+            #
+            # CVA measures raw radiometric difference, so a change in sun
+            # angle, atmosphere or sensor calibration between the two dates
+            # registers as change across the entire scene. IR-MAD is built on
+            # canonical correlation, which is invariant to any affine
+            # radiometric transform of either image, so only departures from
+            # the shared linear relationship survive — which is what change
+            # actually is. It also yields a chi-squared statistic with a
+            # calibrated no-change probability rather than an arbitrary
+            # magnitude scale.
+            magnitude = None
 
-            detector_name = (
-               "optical_cva"
-            )
+            if irmad_module is not None:
+                try:
+                    irmad_result = irmad_module.irmad(
+                        first_data,
+                        second_data,
+                        valid,
+                    )
+                    magnitude = irmad_result.chi_squared
+                    detector_name = "optical_irmad"
 
-            tracer.append_log(
-              "step 10: using optical multiband CVA change magnitude"
-            )
+                    tracer.append_log(
+                        "step 10: using IR-MAD change magnitude "
+                        f"(chi-squared, {first_data.shape[0]} bands, "
+                        f"{irmad_result.iterations} iterations, "
+                        f"converged={irmad_result.converged})"
+                    )
+                    tracer.append_log(
+                        "step 10.1: canonical correlations "
+                        f"{np.round(irmad_result.canonical_correlations, 4).tolist()}, "
+                        f"calibration scale {irmad_result.calibration_scale:.3f}"
+                    )
+                except (np.linalg.LinAlgError, ValueError) as exc:
+                    tracer.append_log(
+                        f"step 10: IR-MAD unavailable for this pair ({exc}); "
+                        "falling back to CVA"
+                    )
+            else:
+                tracer.append_log(
+                    "step 10: IR-MAD module not loaded "
+                    f"({_IRMAD_IMPORT_ERROR}); falling back to CVA"
+                )
+
+            if magnitude is None:
+
+                magnitude = _cva_change(
+                   first_data,
+                   second_data,
+                   valid,
+                )
+
+                detector_name = (
+                   "optical_cva"
+                )
+
+                tracer.append_log(
+                  "step 10: using optical multiband CVA change magnitude"
+                )
 
         # ---------------------------------------------------------------------
         # Optional ChangeFormer candidate
@@ -2749,6 +2888,20 @@ def _analyse_pair(
             mask_path,
         )
 
+        # Browser-drawable copy of the same mask.
+        mask_overlay_path = (
+            output_folder
+            / "change_mask_web.png"
+        )
+
+        mask_overlay = _save_mask_web_overlay(
+            changed,
+            valid,
+            grid["transform"],
+            grid["crs"],
+            mask_overlay_path,
+        )
+
         _save_magnitude_raster(
             magnitude,
             grid["transform"],
@@ -3005,10 +3158,33 @@ def _analyse_pair(
 
         evidence: List[Any] = [
             geojson_data,
-            str(mask_path),
-            str(magnitude_path),
-            str(metadata_path),
         ]
+
+        if mask_overlay is not None:
+            # Origin-relative so it resolves through whatever host is serving
+            # the API. outputs/ is mounted at /static/outputs by main.py.
+            relative = mask_overlay_path.relative_to(OUTPUT_DIR.parent).as_posix()
+            evidence.append(
+                {
+                    "type": "ImageOverlay",
+                    "label": "Detected change",
+                    "url": f"/static/outputs/{relative}",
+                    "wgs84_bounds": mask_overlay["wgs84_bounds"],
+                    "opacity": 0.7,
+                }
+            )
+            tracer.append_log(
+                "step 15.1: wrote Web-Mercator change-mask overlay "
+                f"({mask_overlay['width']}x{mask_overlay['height']} px)"
+            )
+
+        evidence.extend(
+            [
+                str(mask_path),
+                str(magnitude_path),
+                str(metadata_path),
+            ]
+        )
 
         tracer.append_log(
             "step 15: saved spatial evidence and analysis metadata"

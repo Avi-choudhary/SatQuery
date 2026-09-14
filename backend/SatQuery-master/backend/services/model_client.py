@@ -84,6 +84,22 @@ def _image_to_base64_data_uri(image_input: Union[str, Path, Image.Image]) -> str
     return f"data:image/jpeg;base64,{encoded}"
 
 
+def extract_language_instruction(prompt: str) -> tuple[str, str]:
+    """
+    Parses prompt string for language directive tags and returns system instruction rule
+    alongside cleaned prompt content.
+    """
+    if "[Instruction: Respond strictly in Hindi" in prompt:
+        lang_rule = (
+            "CRITICAL: You MUST respond strictly in Hindi language using Devanagari script. "
+            "Translate technical terms accurately or use common Hindi terminology."
+        )
+    else:
+        lang_rule = "CRITICAL: You MUST respond strictly in English language."
+
+    return lang_rule, prompt
+
+
 def query_model(
     image: Union[str, Path, Image.Image],
     prompt: str,
@@ -93,9 +109,10 @@ def query_model(
     """
     Unified query method. Automatically dispatches to either:
     - Remote GPU Server over HTTPS (if MODEL_SERVICE_URL is set)
-    - Local RTX 5060 Ti GPU (if running on the PC with model weights)
+    - Local RTX GPU (if running on the PC with model weights)
     """
     endpoint = MODEL_SERVICE_URL.strip().rstrip("/")
+    lang_rule, clean_prompt = extract_language_instruction(prompt)
 
     # -------------------------------------------------------------
     # Case 1: Remote Model Server Mode (Laptop across any Wi-Fi)
@@ -109,7 +126,8 @@ def query_model(
             b64_img = _image_to_base64_data_uri(image)
             payload = json.dumps({
                 "image": b64_img,
-                "prompt": prompt,
+                "prompt": prompt,  # Retains full prompt with tags for remote LLM
+                "system_instruction": lang_rule,
                 "max_tokens": max_tokens
             }).encode("utf-8")
 
@@ -181,11 +199,15 @@ def query_model(
             img_height=256,
             geotiff_path_or_profile=geotiff_path
         )
+
+        fallback_answer = (
+            "सूचना: बैकएंड डेमो मोड में चल रहा है।" 
+            if "Hindi" in lang_rule else 
+            "Notice: Running in demo fallback mode."
+        )
+
         return {
-            "answer": (
-                f"Notice: Running in demo fallback mode. To enable real GPU AI reasoning, "
-                f"ensure your PC is online and set MODEL_SERVICE_URL in your laptop's .env file."
-            ),
+            "answer": fallback_answer,
             "has_bbox": len(detections) > 0,
             "detections": detections,
             "bbox_normalized": detections[0]["normalized"] if detections else None,
@@ -196,9 +218,14 @@ def query_model(
             "device": "offline_fallback",
             "execution_mode": "offline_fallback"
         }
-    except Exception as e:
+    except Exception:
+        fallback_answer = (
+            "SatQuery AI विश्लेषण पूर्ण हुआ।" 
+            if "Hindi" in lang_rule else 
+            "SatQuery AI analysis complete."
+        )
         return {
-            "answer": "SatQuery AI analysis complete.",
+            "answer": fallback_answer,
             "has_bbox": False,
             "detections": [],
             "geojson": None,

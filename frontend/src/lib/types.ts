@@ -1,0 +1,117 @@
+/** Shared domain types for the SatQuery workspace. */
+
+export type SensorKind = 'optical' | 'sar' | 'fused' | 'unknown';
+
+export type TraceStage = 'INTENT' | 'PREPARE' | 'ROUTE' | 'INFER' | 'SYNTHESIZE';
+
+export type TraceStatus = 'success' | 'warning' | 'error';
+
+/**
+ * One line of the backend's execution trace, parsed into something displayable.
+ *
+ * Everything here is derived from what the backend actually emitted. Fields the
+ * backend does not report (per-step latency, cryptographic audit hashes) are
+ * deliberately absent rather than fabricated — the previous UI invented both
+ * and presented them as verified telemetry.
+ */
+export interface TraceStep {
+  id: string;
+  stage: TraceStage;
+  /** Short human-readable summary shown in the list. */
+  action: string;
+  /** The specialist the line refers to, when it names one. */
+  tool: string | null;
+  /** Original untouched log line. */
+  raw: string;
+  status: TraceStatus;
+  /** Only set when the backend printed a confidence in the line. */
+  confidence?: number;
+}
+
+export interface SceneOverlay {
+  datasetId?: string;
+  name: string;
+  sensor: string;
+  mode: 'single' | 'bi-temporal';
+  /** [minLon, minLat, maxLon, maxLat] in WGS84. */
+  bounds: [number, number, number, number];
+  /** [lon, lat] */
+  center: [number, number];
+  crs: string;
+  resolution: string;
+  areaSqKm?: number;
+  t1ImageUrl: string;
+  t2ImageUrl?: string | null;
+  t1Filename?: string;
+  t2Filename?: string | null;
+}
+
+export interface SceneDataset {
+  name: string;
+  sizeLabel: string;
+  sensor: string;
+  mode: 'single' | 'bi-temporal';
+  crs: string;
+  resolution: string;
+  /** Present only for locally uploaded scenes that still need sending. */
+  files?: File[];
+  /** True once the backend has ingested these bytes and knows the name. */
+  syncedWithBackend: boolean;
+  areaSqKm?: number;
+  /**
+   * False when the raster carries no CRS. Such a file cannot be placed on a
+   * map at all, and the UI must say so rather than guess a location.
+   */
+  georeferenced: boolean;
+}
+
+export type MessageRole = 'user' | 'assistant';
+
+export type MessageStatus = 'pending' | 'complete' | 'error' | 'cancelled';
+
+/** A georeferenced raster the backend rendered for display on the map. */
+export interface ImageOverlayEvidence {
+  label: string;
+  url: string;
+  /** [minLon, minLat, maxLon, maxLat] of a Web-Mercator-warped PNG. */
+  bounds: [number, number, number, number];
+  opacity: number;
+}
+
+export interface MessageEvidence {
+  geoJson: any | null;
+  featureCount: number;
+  /** Total hectares across change features, when the payload reports areas. */
+  areaHa?: number;
+  /** e.g. the change mask, already warped so it registers on the basemap. */
+  overlay?: ImageOverlayEvidence | null;
+}
+
+export interface ChatMessage {
+  id: string;
+  role: MessageRole;
+  content: string;
+  timestamp: string;
+  status: MessageStatus;
+  datasetName?: string;
+  sensor?: string;
+  /** Assistant turns only. */
+  trace?: TraceStep[];
+  evidence?: MessageEvidence;
+  /** Wall-clock time measured by the client, in ms. */
+  elapsedMs?: number;
+  /** Populated when status === 'error'. */
+  errorDetail?: string;
+  /** The user text that produced this turn, so a failed turn can be retried. */
+  sourceQuery?: string;
+}
+
+export interface Session {
+  id: string;
+  title: string;
+  startedAt: string;
+  messages: ChatMessage[];
+  datasetName?: string;
+}
+
+export type BackendPhase = 'checking' | 'online' | 'offline';

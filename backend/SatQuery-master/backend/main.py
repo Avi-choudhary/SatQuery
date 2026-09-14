@@ -35,6 +35,15 @@ from fastapi.staticfiles import StaticFiles
 
 app.include_router(api_router, prefix="/api/v1")
 
+# Feature: Interactive Map STAC/COG AOI Streamer (Phase 2)
+ENABLE_INTERACTIVE_MAP = True
+if ENABLE_INTERACTIVE_MAP:
+    try:
+        from api.interactive_map_routes import router as interactive_map_router
+        app.include_router(interactive_map_router, prefix="/api/v1/interactive-map", tags=["Interactive Map"])
+    except Exception as e:
+        print(f"[Warning] Interactive Map router could not be loaded: {e}")
+
 # Mount static directory for preview imagery & uploaded rasters
 static_dir = os.path.join(current_dir, "temp_uploads")
 os.makedirs(static_dir, exist_ok=True)
@@ -104,6 +113,9 @@ def system_status():
         "status": "online",
         "execution_mode": "remote_gpu_api" if MODEL_SERVICE_URL else ("local_gpu_cuda" if gpu_available else "offline_fallback"),
         "model_engine": {
+            "model_name": "Qwen3-VL-2B-SatQuery (Multimodal S1/S2)",
+            "model_checkpoint": "qwen3_vl_satquery_merged",
+            "modalities_supported": ["Sentinel-1 SAR", "Sentinel-2 Optical", "Dual-Modal S1+S2"],
             "remote_service_url": MODEL_SERVICE_URL if MODEL_SERVICE_URL else None,
             "remote_host_status": remote_status if MODEL_SERVICE_URL else "N/A (running locally)",
             "remote_vram": remote_vram,
@@ -117,9 +129,9 @@ def system_status():
             "api_endpoint": f"http://localhost:{PORT}/api/v1/satquery"
         },
         "specialists": {
-            "tool_1_vqa": "ready (Qwen3-VL-2B-SatQuery)",
+            "tool_1_vqa": "ready (Qwen3-VL-2B-SatQuery Multimodal S1/S2)",
             "tool_2_grounding": "ready (WGS84 GeoJSON polygon projection)",
-            "tool_3_change_detection": "ready (ChangeFormerV6 + Change Detective)"
+            "tool_3_change_detection": "ready (ChangeFormerV6 + IR-MAD + CVA)"
         }
     }
 

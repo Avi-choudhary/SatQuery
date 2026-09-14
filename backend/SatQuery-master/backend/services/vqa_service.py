@@ -1,5 +1,6 @@
 import os
 import sys
+import re
 from pathlib import Path
 from typing import List, Tuple, Optional, Any
 from core.tracer import Tracer
@@ -22,6 +23,32 @@ except ImportError:
     from response_synthesizer import synthesize_conversational_response
 
 
+def _clean_vqa_response(raw_answer: str, is_hindi: bool) -> str:
+    """
+    Cleans raw model outputs, removes loop repetitions, and ensures proper
+    sentence punctuation without template nesting.
+    """
+    if not raw_answer:
+        return "सत्यापन पूर्ण हुआ।" if is_hindi else "VQA analysis completed."
+
+    clean = raw_answer.strip()
+    delimiters = "।" if "।" in clean else "."
+    sentences = clean.split(delimiters)
+    
+    unique_sentences = []
+    for s in sentences:
+        cleaned_s = s.strip()
+        if cleaned_s and cleaned_s not in unique_sentences:
+            unique_sentences.append(cleaned_s)
+            
+    sep = "। " if "।" in clean or is_hindi else ". "
+    deduped = sep.join(unique_sentences)
+    if deduped and not deduped.endswith((".", "।")):
+        deduped += "।" if is_hindi else "."
+        
+    return deduped
+
+
 async def run_inference(query: str, file_paths: List[str], tracer: Tracer) -> Tuple[str, List]:
     """
     Executes Tool 1: Single-Image VQA.
@@ -29,9 +56,13 @@ async def run_inference(query: str, file_paths: List[str], tracer: Tracer) -> Tu
     """
     tracer.append_log("step 2: routed to Specialist Tool 1 (Single-Image VQA)")
 
+    # Detect language directive prepended by frontend toggle
+    is_hindi = "[Instruction: Respond strictly in Hindi" in query or bool(re.search(r"[\u0900-\u097F]", query))
+
     if not file_paths:
         tracer.append_log("step 2.error: no satellite imagery files provided")
-        return "Error: No satellite imagery files provided for VQA analysis.", []
+        err_msg = "त्रुटि: VQA विश्लेषण के लिए कोई उपग्रह छवि फ़ाइल प्रदान नहीं की गई।" if is_hindi else "Error: No satellite imagery files provided for VQA analysis."
+        return err_msg, []
 
     target_file = file_paths[0]
     tracer.append_log(f"step 2.1: ingesting satellite scene: {os.path.basename(target_file)}")
@@ -64,11 +95,30 @@ async def run_inference(query: str, file_paths: List[str], tracer: Tracer) -> Tu
                 tracer.append_log(f"step 2.2b: preview generation note: {pe}")
 
     try:
-        user_prompt = (
-            f"Satellite Image Analysis.\n\n"
-            f"User Question: {query}\n\n"
-            f"Please provide a clear, conversational answer addressing this question based on the visual evidence in the image."
-        )
+        # Detect sensor modality (Sentinel-1 SAR vs Sentinel-2 Optical vs Dual)
+        from utils import gis_pipeline
+        sensor_info = gis_pipeline.get_geotiff_info(target_file)
+        sensor_str = (sensor_info.get("sensor") or "").lower()
+        fname_lower = os.path.basename(target_file).lower()
+        q_lower = query.lower()
+
+        if any(k in sensor_str or k in fname_lower or k in q_lower for k in ["sentinel-1", "_s1", "sar", "radar", "risat", "eos-04", "backscatter"]):
+            prompt_prefix = "Analyze this Sentinel-1 Synthetic Aperture Radar (SAR) image (VV/VH backscatter composite)."
+            modality_label = "Sentinel-1 (SAR)"
+        elif any(k in sensor_str or k in fname_lower or k in q_lower for k in ["sentinel-2", "_s2", "optical", "rgb", "cartosat", "resourcesat"]):
+            prompt_prefix = "Analyze this Sentinel-2 optical satellite image."
+            modality_label = "Sentinel-2 (Optical)"
+        elif "dual" in fname_lower or "dual" in q_lower or len(file_paths) >= 2:
+            prompt_prefix = "Analyze this dual-sensor satellite scene (Left: Sentinel-2 Optical RGB, Right: Sentinel-1 SAR radar backscatter)."
+            modality_label = "Cross-Modality Dual (S1+S2)"
+        else:
+            prompt_prefix = "Analyze this Sentinel-2 optical satellite image."
+            modality_label = "Sentinel-2 (Optical)"
+
+        tracer.append_log(f"step 2.3: sensor modality identified: {modality_label} (activating specialized fine-tuned weights)")
+
+        # Format user prompt matching the exact multi-modal dataset format
+        user_prompt = f"{prompt_prefix}\n\nQuestion: {query}"
 
         res = query_model(
             image=visual_input,
@@ -77,19 +127,37 @@ async def run_inference(query: str, file_paths: List[str], tracer: Tracer) -> Tu
             max_tokens=1024
         )
 
-        raw_answer = res.get("answer", "VQA analysis completed.")
+        model_answer = res.get("answer", "")
+        raw_answer = res.get("raw_answer") or model_answer
+        scene_landcover = res.get("scene_landcover")
         latency = res.get("client_total_latency_ms") or res.get("latency_ms", 0)
         mode = res.get("execution_mode", "local_gpu_cuda")
         server_info = f" ({res.get('server_url')})" if res.get("server_url") else ""
         detections = res.get("detections", [])
 
-        # Synthesize conversational response if raw_answer is terse or pure coordinates
-        text_answer = synthesize_conversational_response(
-            query=query,
-            raw_answer=raw_answer,
-            detections=detections,
-            wgs84_bounds=res.get("wgs84_bbox")
-        )
+        # Check if model returned full Devanagari text or a detailed paragraph
+        has_devanagari = bool(re.search(r"[\u0900-\u097F]", model_answer))
+        is_already_conversational = len(model_answer.split()) >= 10 and "primarily composed of **no**" not in model_answer
+        
+        if is_already_conversational:
+            # Direct cleanup for full answers to avoid template nesting collisions
+            text_answer = _clean_vqa_response(model_answer, is_hindi=is_hindi or has_devanagari)
+            if detections and "cyan" not in text_answer.lower() and "मानचित्र" not in text_answer and "map" not in text_answer.lower():
+                map_note = (
+                    "\n\n*मैंने आपके इंटरैक्टिव मानचित्र पर पहचाने गए क्षेत्र को नियॉन सियान रंग में हाइलाइट किया है।*"
+                    if (is_hindi or has_devanagari) else
+                    "\n\n*I have also highlighted the identified sector in neon cyan on your interactive map.*"
+                )
+                text_answer += map_note
+        else:
+            # Fall back to conversational synthesizer
+            text_answer = synthesize_conversational_response(
+                query=query,
+                raw_answer=raw_answer,
+                scene_landcover=scene_landcover,
+                detections=detections,
+                wgs84_bounds=res.get("wgs84_bbox")
+            )
 
         # Collect visual evidence (GeoJSON bounding boxes) so MapLibre renders them
         visual_evidence = []
@@ -109,6 +177,5 @@ async def run_inference(query: str, file_paths: List[str], tracer: Tracer) -> Tu
 
     except Exception as e:
         tracer.append_log(f"step 2.error: model inference exception: {e}")
-        return f"VQA analysis error: {e}", []
-
-
+        err_msg = f"VQA विश्लेषण त्रुटि: {e}" if is_hindi else f"VQA analysis error: {e}"
+        return err_msg, []

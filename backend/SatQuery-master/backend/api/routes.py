@@ -137,11 +137,14 @@ async def handle_satquery(
         if not saved_file_paths:
             saved_file_paths = _resolve_target_imagery(clean_dataset_name)
 
+        # process_query receives the query string (including any hidden [Instruction: ...] tags)
         response = await process_query(query, saved_file_paths)
         return response
 
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        is_hindi = "[Instruction: Respond strictly in Hindi" in query
+        detail_msg = f"क्वेरी संसाधित करने में त्रुटि: {str(e)}" if is_hindi else f"Query processing error: {str(e)}"
+        raise HTTPException(status_code=500, detail=detail_msg)
 
 
 @router.post("/satquery/json", response_model=SatQueryResponse)
@@ -164,7 +167,9 @@ async def handle_satquery_json(req: JsonQueryRequest):
 
         return await process_query(req.query, saved_file_paths)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        is_hindi = "[Instruction: Respond strictly in Hindi" in req.query
+        detail_msg = f"क्वेरी संसाधित करने में त्रुटि: {str(e)}" if is_hindi else f"Query processing error: {str(e)}"
+        raise HTTPException(status_code=500, detail=detail_msg)
 
 
 def _generate_raster_preview(file_path: str) -> Optional[str]:
@@ -257,43 +262,68 @@ async def upload_imagery(
         if not saved_paths:
             raise HTTPException(status_code=400, detail="Failed to save uploaded imagery.")
 
-        # Extract GIS info for primary file (T1)
+        # Build the map overlay. For a georeferenced raster this warps to Web
+        # Mercator so the PNG registers exactly; for a plain image it falls
+        # back to a thumbnail that carries no geographic claim.
         info_t1 = gis_pipeline.get_geotiff_info(saved_paths[0])
-        prev_t1 = _generate_raster_preview(saved_paths[0]) or os.path.basename(saved_paths[0])
+        overlay_t1 = gis_pipeline.build_web_overlay(saved_paths[0], output_dir=TEMP_DIR)
+        overlay_t2 = (
+            gis_pipeline.build_web_overlay(saved_paths[1], output_dir=TEMP_DIR)
+            if len(saved_paths) > 1
+            else None
+        )
+
+        georeferenced = overlay_t1 is not None
+
+        if georeferenced:
+            prev_t1 = overlay_t1["png_name"]
+            # The warped extent is the true footprint; the raw WGS84 envelope of
+            # a rotated scene is not.
+            bounds = overlay_t1["wgs84_bounds"]
+        else:
+            prev_t1 = _generate_raster_preview(saved_paths[0]) or os.path.basename(saved_paths[0])
+            bounds = info_t1.get("wgs84_bounds")
 
         prev_t2 = None
         if len(saved_paths) > 1:
-            prev_t2 = _generate_raster_preview(saved_paths[1]) or os.path.basename(saved_paths[1])
+            if overlay_t2 is not None:
+                prev_t2 = overlay_t2["png_name"]
+            else:
+                prev_t2 = _generate_raster_preview(saved_paths[1]) or os.path.basename(saved_paths[1])
 
-        # Fallback bounds if non-georeferenced image
-        bounds = info_t1.get("wgs84_bounds")
-        center_lon = info_t1.get("center_lon")
-        center_lat = info_t1.get("center_lat")
+        # A file with no CRS cannot be placed on a map. Say so instead of
+        # dropping it over Bengaluru, which is what this used to do.
+        center_lon = center_lat = None
+        area_km = 0.0
+        if bounds:
+            center_lon = round((bounds[0] + bounds[2]) / 2, 6)
+            center_lat = round((bounds[1] + bounds[3]) / 2, 6)
+            area_km = _calculate_area_sq_km(bounds, center_lat)
 
-        if not bounds:
-            # Default to Bengaluru Urban extent for standard images
-            bounds = [77.618, 13.022, 77.652, 13.048]
-            center_lon = 77.635
-            center_lat = 13.035
-
-        area_km = _calculate_area_sq_km(bounds, center_lat)
         sensor_name = sensor_type or info_t1.get("sensor", "Sentinel-2 (Optical)")
         mode_val = "bi-temporal" if len(saved_paths) > 1 else "single"
+        cache_bust = int(time.time())
 
+        # Preview URLs are returned as origin-relative paths. An absolute
+        # http://localhost:8000 URL only resolves on the machine running this
+        # server, so it broke every client on the LAN and any dev-server proxy.
         return {
-            "dataset_id": f"ds_{int(time.time())}",
+            "dataset_id": f"ds_{cache_bust}",
             "name": os.path.basename(saved_paths[0]),
             "sensor": sensor_name,
             "mode": mode_val,
+            "georeferenced": georeferenced,
             "wgs84_bounds": bounds,
-            "center": [center_lon, center_lat],
-            "crs": info_t1.get("crs", "EPSG:4326 (WGS84)"),
-            "resolution": "10.0m GSD" if not info_t1.get("resolution") else f"{info_t1['resolution'][0]}m GSD",
+            "center": [center_lon, center_lat] if bounds else None,
+            "crs": (overlay_t1 or {}).get("source_crs") or info_t1.get("crs", "unknown"),
+            "resolution": (
+                f"{info_t1['resolution'][0]}m GSD" if info_t1.get("resolution") else "unknown"
+            ),
             "area_sq_km": area_km,
-            "t1_image_url": f"http://localhost:8000/static/{prev_t1}?t={int(time.time())}",
-            "t2_image_url": f"http://localhost:8000/static/{prev_t2}?t={int(time.time())}" if prev_t2 else None,
+            "t1_image_url": f"/static/{prev_t1}?t={cache_bust}",
+            "t2_image_url": f"/static/{prev_t2}?t={cache_bust}" if prev_t2 else None,
             "t1_filename": os.path.basename(saved_paths[0]),
-            "t2_filename": os.path.basename(saved_paths[1]) if len(saved_paths) > 1 else None
+            "t2_filename": os.path.basename(saved_paths[1]) if len(saved_paths) > 1 else None,
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Imagery ingestion error: {str(e)}")
@@ -314,8 +344,8 @@ def get_imagery_presets():
             "crs": "EPSG:32643 (UTM 43N)",
             "resolution": "10.0m GSD",
             "area_sq_km": 124.5,
-            "t1_image_url": "http://localhost:8000/static/prev_east_delhi_2018_S2.png",
-            "t2_image_url": "http://localhost:8000/static/prev_delhi_20260112_S2.png"
+            "t1_image_url": "/static/prev_east_delhi_2018_S2.png",
+            "t2_image_url": "/static/prev_delhi_20260112_S2.png"
         },
         {
             "id": "delhi_s2",
@@ -328,7 +358,7 @@ def get_imagery_presets():
             "crs": "EPSG:32643 (UTM 43N)",
             "resolution": "10.0m GSD",
             "area_sq_km": 1050.4,
-            "t1_image_url": "http://localhost:8000/static/delhi_preview.png"
+            "t1_image_url": "/static/delhi_preview.png"
         },
         {
             "id": "bengaluru_urban_pair",
@@ -341,22 +371,36 @@ def get_imagery_presets():
             "crs": "EPSG:4326 (WGS84)",
             "resolution": "10.0m GSD",
             "area_sq_km": 10.5,
-            "t1_image_url": "http://localhost:8000/static/Bengaluru_T1_Pre.png",
-            "t2_image_url": "http://localhost:8000/static/Bengaluru_T2_Post.png"
+            "t1_image_url": "/static/Bengaluru_T1_Pre.png",
+            "t2_image_url": "/static/Bengaluru_T2_Post.png"
         },
         {
             "id": "mangalore_sar",
             "name": "Mangalore_Harbor_SAR_VV.tif",
-            "displayName": "Mangalore Port & Anchorage (SAR Radar)",
-            "sensor": "SAR (Sentinel-1)",
+            "displayName": "Mangalore Port (RISAT-1A / EOS-04 SAR)",
+            "sensor": "SAR (RISAT-1A / EOS-04)",
             "mode": "single",
             "wgs84_bounds": [74.780, 12.850, 74.880, 12.950],
             "center": [74.830, 12.900],
             "crs": "EPSG:4326 (WGS84)",
-            "resolution": "10.0m GSD",
+            "resolution": "2.0m GSD (FRS Mode)",
             "area_sq_km": 118.2,
-            "t1_image_url": "http://localhost:8000/static/Mangalore_SAR_VV.png"
+            "t1_image_url": "/static/Mangalore_SAR_VV.png"
+        },
+        {
+            "id": "cartosat_ahmedabad",
+            "name": "Ahmedabad_Cartosat3_Pan.tif",
+            "displayName": "Ahmedabad City (Cartosat-3 High-Res)",
+            "sensor": "Optical (Cartosat-3 PAN)",
+            "mode": "single",
+            "wgs84_bounds": [72.5714, 23.0225, 72.6114, 23.0625],
+            "center": [72.5914, 23.0425],
+            "crs": "EPSG:32643 (UTM 43N)",
+            "resolution": "0.28m GSD",
+            "area_sq_km": 15.6,
+            "t1_image_url": "/static/Bengaluru_T1_Pre.png" 
         }
     ]
+
 
 

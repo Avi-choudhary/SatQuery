@@ -1,28 +1,280 @@
 @import "tailwindcss";
 
-@theme {
-  --color-space-black: #05070C;
-  --color-space-navy: #0a0e1a;
-  --color-accent-cyan: #00f2ff;
-  --color-accent-teal: #00dec2;
-  --color-accent-warm: #ffaa00;
+/* ==========================================================================
+   SatQuery AI — design tokens
+   Dark, instrument-panel aesthetic: deep blue-black ground, a single cyan
+   accent used sparingly, and a layered surface scale so panels read as
+   depth rather than as a stack of glass rectangles.
+   ========================================================================== */
 
-  --font-sans: "Inter", sans-serif;
-  --font-mono: "JetBrains Mono", monospace;
+@theme {
+  /* --- Ground & surfaces (low → high elevation) --- */
+  --color-ground: #05070c;
+  --color-surface: #090d15;
+  --color-surface-2: #0e1420;
+  --color-surface-3: #151d2c;
+  --color-surface-4: #1c2637;
+
+  /* --- Hairlines --- */
+  --color-line: #1a2231;
+  --color-line-strong: #27324a;
+
+  /* --- Text --- */
+  --color-ink: #e6ecf5;
+  --color-ink-muted: #94a3b8;
+  --color-ink-faint: #5d6b83;
+
+  /* --- Accents --- */
+  --color-accent: #00d8f0;
+  --color-accent-dim: #0b8ea0;
+  --color-teal: #00d2b4;
+  --color-amber: #f5a524;
+  --color-violet: #a78bfa;
+  --color-danger: #f2686d;
+  --color-ok: #34d399;
+
+  /* --- Legacy aliases (kept so existing marketing sections keep working) --- */
+  --color-space-black: #05070c;
+  --color-space-navy: #0e1420;
+  --color-accent-cyan: #00d8f0;
+  --color-accent-teal: #00d2b4;
+  --color-accent-warm: #f5a524;
+
+  /* --- Type --- */
+  --font-sans: "Inter Variable", "Inter", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, monospace;
+
+  /* --- Radii --- */
+  --radius-panel: 0.875rem;
+
+  /* --- Motion --- */
+  --ease-out-soft: cubic-bezier(0.22, 1, 0.36, 1);
 }
+
+/* ==========================================================================
+   Base
+   ========================================================================== */
 
 @layer base {
+  * {
+    border-color: var(--color-line);
+  }
+
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+
   body {
-    @apply bg-space-black text-slate-200 font-sans antialiased;
+    background-color: var(--color-ground);
+    color: var(--color-ink);
+    font-family: var(--font-sans);
+    font-feature-settings: "cv02", "cv03", "cv04", "ss01";
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+
+  ::selection {
+    background-color: color-mix(in srgb, var(--color-accent) 30%, transparent);
+    color: #ffffff;
+  }
+
+  /* Visible, consistent keyboard focus everywhere. */
+  :focus-visible {
+    outline: 2px solid color-mix(in srgb, var(--color-accent) 70%, transparent);
+    outline-offset: 2px;
+    border-radius: 4px;
+  }
+
+  input,
+  textarea,
+  select,
+  button {
+    font: inherit;
+    color: inherit;
+  }
+
+  /* Range inputs (opacity / temporal sliders) */
+  input[type="range"] {
+    -webkit-appearance: none;
+    appearance: none;
+    background: transparent;
+    cursor: pointer;
+  }
+
+  input[type="range"]::-webkit-slider-runnable-track {
+    height: 3px;
+    border-radius: 999px;
+    background: var(--color-surface-4);
+  }
+
+  input[type="range"]::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    appearance: none;
+    height: 13px;
+    width: 13px;
+    margin-top: -5px;
+    border-radius: 999px;
+    background: var(--color-accent);
+    border: 2px solid var(--color-ground);
+    box-shadow: 0 0 0 1px color-mix(in srgb, var(--color-accent) 50%, transparent);
+  }
+
+  input[type="range"]::-moz-range-track {
+    height: 3px;
+    border-radius: 999px;
+    background: var(--color-surface-4);
+  }
+
+  input[type="range"]::-moz-range-thumb {
+    height: 13px;
+    width: 13px;
+    border-radius: 999px;
+    border: 2px solid var(--color-ground);
+    background: var(--color-accent);
   }
 }
 
-@layer components {
-  .glass-panel {
-    @apply bg-white/5 backdrop-blur-md border border-white/10;
-  }
+/* ==========================================================================
+   Utilities
+   ========================================================================== */
 
-  .text-glow {
-    text-shadow: 0 0 4px rgba(0, 242, 255, 0.2);
+/* Faint orbital grid used behind hero / empty states. Referenced by the old
+   Console section; now actually defined. */
+.radar-grid {
+  background-image:
+    linear-gradient(to right, rgb(255 255 255 / 0.035) 1px, transparent 1px),
+    linear-gradient(to bottom, rgb(255 255 255 / 0.035) 1px, transparent 1px);
+  background-size: 48px 48px;
+  mask-image: radial-gradient(ellipse 80% 60% at 50% 40%, #000 20%, transparent 78%);
+}
+
+.dot-grid {
+  background-image: radial-gradient(circle at 1px 1px, rgb(255 255 255 / 0.06) 1px, transparent 0);
+  background-size: 22px 22px;
+}
+
+.scrollbar-hide {
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+.scrollbar-hide::-webkit-scrollbar {
+  display: none;
+}
+
+.scrollbar-slim {
+  scrollbar-width: thin;
+  scrollbar-color: var(--color-surface-4) transparent;
+}
+.scrollbar-slim::-webkit-scrollbar {
+  width: 9px;
+  height: 9px;
+}
+.scrollbar-slim::-webkit-scrollbar-track {
+  background: transparent;
+}
+.scrollbar-slim::-webkit-scrollbar-thumb {
+  background-color: var(--color-surface-4);
+  border-radius: 999px;
+  border: 3px solid transparent;
+  background-clip: content-box;
+}
+.scrollbar-slim::-webkit-scrollbar-thumb:hover {
+  background-color: var(--color-line-strong);
+  background-clip: content-box;
+}
+
+/* Small-caps technical label for panel headers and metric captions.
+   Deliberately sets no colour: these classes sit outside Tailwind's cascade
+   layers and would otherwise beat any text-* utility paired with them. */
+.label-caps {
+  font-family: var(--font-mono);
+  font-size: 0.625rem;
+  line-height: 1;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+
+.text-glow {
+  text-shadow: 0 0 24px color-mix(in srgb, var(--color-accent) 45%, transparent);
+}
+
+.glass-panel {
+  background-color: color-mix(in srgb, var(--color-surface-2) 72%, transparent);
+  backdrop-filter: blur(14px);
+  border: 1px solid var(--color-line);
+}
+
+/* Thin animated sweep used for in-flight states. */
+.sweep-line {
+  position: relative;
+  overflow: hidden;
+}
+.sweep-line::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(
+    90deg,
+    transparent,
+    color-mix(in srgb, var(--color-accent) 55%, transparent),
+    transparent
+  );
+  transform: translateX(-100%);
+  animation: sweep 1.6s var(--ease-out-soft) infinite;
+}
+
+@keyframes sweep {
+  to {
+    transform: translateX(100%);
   }
+}
+
+/* Three-dot thinking indicator. */
+@keyframes blink-dot {
+  0%, 80%, 100% { opacity: 0.2; }
+  40% { opacity: 1; }
+}
+.thinking-dot {
+  animation: blink-dot 1.3s infinite both;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+/* MapLibre chrome — align the library's default controls with the app. */
+.maplibregl-ctrl-attrib,
+.maplibregl-ctrl-scale {
+  background: color-mix(in srgb, var(--color-ground) 78%, transparent) !important;
+  color: var(--color-ink-faint) !important;
+  border-color: var(--color-line) !important;
+  font-family: var(--font-mono) !important;
+  font-size: 10px !important;
+}
+.maplibregl-ctrl-attrib a {
+  color: var(--color-ink-muted) !important;
+}
+.maplibregl-popup-content {
+  background: var(--color-surface-2) !important;
+  border: 1px solid var(--color-line-strong) !important;
+  border-radius: 10px !important;
+  padding: 0 !important;
+  box-shadow: 0 18px 40px -12px rgb(0 0 0 / 0.7) !important;
+}
+.maplibregl-popup-tip {
+  border-top-color: var(--color-line-strong) !important;
+  border-bottom-color: var(--color-line-strong) !important;
+}
+.maplibregl-popup-close-button {
+  color: var(--color-ink-faint) !important;
+  font-size: 16px !important;
+  padding: 2px 7px !important;
 }

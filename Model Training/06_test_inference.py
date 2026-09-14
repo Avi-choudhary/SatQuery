@@ -84,7 +84,8 @@ def test_inference(args):
 
     if args.interactive:
         import random
-        with open("data/qwen_val.json", "r", encoding="utf-8") as f:
+        val_file = "data/qwen_val_multimodal.json" if os.path.exists("data/qwen_val_multimodal.json") else "data/qwen_val.json"
+        with open(val_file, "r", encoding="utf-8") as f:
             val_samples = json.load(f)
         print("\n" + "="*60)
         print("[SatQuery] Interactive Satellite QA Mode Active!")
@@ -131,7 +132,8 @@ def test_inference(args):
         # Single query mode
         image_path = args.image
         if not image_path or not os.path.exists(image_path):
-            with open("data/qwen_val.json", "r", encoding="utf-8") as f:
+            val_file = "data/qwen_val_multimodal.json" if os.path.exists("data/qwen_val_multimodal.json") else "data/qwen_val.json"
+            with open(val_file, "r", encoding="utf-8") as f:
                 val_samples = json.load(f)
             sample = val_samples[0]
             image_path = sample["image"]
@@ -140,7 +142,7 @@ def test_inference(args):
             print(f"Using sample from validation set: {sample['id']}")
             print(f"Ground Truth Reference: {ground_truth}")
         else:
-            default_question = "Analyze this Sentinel-2 satellite image. Describe what land cover types, terrain features, and vegetation patterns are visible."
+            default_question = "Analyze this satellite image. Describe what land cover types, surface features, and patterns are visible."
 
         question = args.prompt if args.prompt else default_question
         print(f"\nImage Path: {image_path}")
@@ -150,7 +152,7 @@ def test_inference(args):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Test Qwen3-VL satellite inference")
     parser.add_argument("--base_model", type=str, default="Qwen/Qwen3-VL-2B-Instruct")
-    parser.add_argument("--lora_dir", type=str, default="output/qwen3_vl_satquery_lora")
+    parser.add_argument("--lora_dir", type=str, default="output/qwen3_vl_satquery_multimodal_lora")
     parser.add_argument("--image", type=str, default=None, help="Path to satellite image PNG")
     parser.add_argument("--prompt", type=str, default=None, help="Custom question prompt")
     parser.add_argument("--max_tokens", type=int, default=256)

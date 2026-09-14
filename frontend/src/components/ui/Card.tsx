@@ -2,24 +2,29 @@ import React from 'react';
 import { cn } from '../../lib/utils';
 
 interface CardProps extends React.HTMLAttributes<HTMLDivElement> {
-  variant?: 'default' | 'glass';
+  variant?: 'default' | 'glass' | 'raised';
+  interactive?: boolean;
 }
 
-export const Card = React.forwardRef<HTMLDivElement, CardProps>(
-  ({ className, variant = 'default', ...props }, ref) => {
-    const variants = {
-      default: 'bg-space-navy border border-white/10 shadow-none',
-      glass: 'bg-white/5 backdrop-blur-md border border-white/10 shadow-none',
-    };
+const VARIANTS = {
+  default: 'bg-surface border border-line',
+  glass: 'bg-surface-2/60 backdrop-blur-lg border border-line',
+  raised: 'bg-surface-2 border border-line-strong',
+} as const;
 
-    return (
-      <div
-        ref={ref}
-        className={cn('rounded-xl p-6 transition-all', variants[variant], className)}
-        {...props}
-      />
-    );
-  }
+export const Card = React.forwardRef<HTMLDivElement, CardProps>(
+  ({ className, variant = 'default', interactive, ...props }, ref) => (
+    <div
+      ref={ref}
+      className={cn(
+        'rounded-panel p-5 transition-colors duration-150',
+        VARIANTS[variant],
+        interactive && 'cursor-pointer hover:border-accent/35 hover:bg-surface-3/60',
+        className
+      )}
+      {...props}
+    />
+  )
 );
 
 Card.displayName = 'Card';

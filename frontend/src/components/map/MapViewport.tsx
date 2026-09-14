@@ -1,40 +1,50 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import * as maplibregl from 'maplibre-gl';
 import 'maplibre-gl/dist/maplibre-gl.css';
-import { Panel } from '../ui/Panel';
 import {
-  ZoomIn,
-  ZoomOut,
-  Compass,
-  Crosshair,
-  Maximize2,
-  Minimize2,
-  Locate,
-  Globe,
-  MapPin,
-  Search,
-  Sliders,
-  Play,
-  Pause,
-  Layers,
-  Sparkles,
   ArrowLeftRight,
-  Focus,
+  Building2,
+  Check,
+  Compass,
+  Crop,
+  Crosshair,
   Eye,
   EyeOff,
-  Palette,
-  X,
-  Building2,
   Flag,
-  Loader2
+  Focus,
+  Globe,
+  Layers,
+  Loader2,
+  Locate,
+  MapPin,
+  Maximize2,
+  Minimize2,
+  Palette,
+  Pause,
+  Play,
+  Search,
+  X,
+  ZoomIn,
+  ZoomOut
 } from 'lucide-react';
-import { useTrace, type SentinelOverlay } from '../../context/TraceContext';
+import { IconButton } from '../ui/Button';
+import { useApp } from '../../context/AppState';
+import type { ImageOverlayEvidence, SceneOverlay } from '../../lib/types';
 import {
   searchLocations,
   parseCoordinates,
-  type GeocodingResult,
-  type LocationCategory
+  type GeocodingResult
 } from '../../lib/geocoding';
+import { AOIBoxSelector } from './aoi/AOIBoxSelector';
+import { AOIFetchModal } from './aoi/AOIFetchModal';
+import { AOIChatbotHandoff } from './aoi/AOIChatbotHandoff';
+import {
+  type FetchAOIResponse,
+  aoiResponseToSceneOverlay,
+} from '../../lib/interactiveMapApi';
+
+// Feature Flag: Interactive Map AOI Streamer (Phase 2)
+const ENABLE_AOI_FETCHER = true;
 
 // Production-grade global basemaps (Google Maps style, 0 API keys required)
 const SATELLITE_STYLE: any = {
@@ -181,19 +191,106 @@ export type BaseLayerType = 'satellite' | 'hybrid' | 'streets' | 'sar';
 export type BandFilterType = 'true-color' | 'false-color-nir' | 'sar-contrast' | 'edge-boost';
 export type TemporalModeType = 'swipe' | 'fade' | 't1' | 't2';
 
+/** How much chrome the map shows. `compact` is for the side dock. */
+export type MapDensity = 'full' | 'compact';
+
+/**
+ * Analysis rasters (change masks) are drawn through a single image source that
+ * is created once at map load and only ever updated afterwards.
+ *
+ * This map never reports a settled style on maplibre-gl 6 — `getStyle()` stays
+ * undefined and `addSource` throws "Style is not done loading" indefinitely —
+ * so anything added lazily never lands. Creating the source up front with a
+ * transparent pixel sidesteps that entirely: `updateImage` and the paint/layout
+ * setters work regardless of style state.
+ */
+const RESULT_RASTER_SOURCE = 'satquery-result-raster';
+const RESULT_RASTER_LAYER = 'satquery-result-raster-layer';
+const TRANSPARENT_PIXEL =
+  'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
+const PLACEHOLDER_COORDS: [[number, number], [number, number], [number, number], [number, number]] = [
+  [-0.001, 0.001],
+  [0.001, 0.001],
+  [0.001, -0.001],
+  [-0.001, -0.001]
+];
+
+const BASE_LAYERS: Array<{ value: BaseLayerType; label: string }> = [
+  { value: 'satellite', label: 'Satellite' },
+  { value: 'hybrid', label: 'Hybrid' },
+  { value: 'streets', label: 'Streets' },
+  { value: 'sar', label: 'SAR dark' }
+];
+
+const BAND_PRESETS: Array<{ value: BandFilterType; label: string }> = [
+  { value: 'true-color', label: 'True colour' },
+  { value: 'false-color-nir', label: 'False colour (NIR)' },
+  { value: 'sar-contrast', label: 'SAR contrast' },
+  { value: 'edge-boost', label: 'Edge boost' }
+];
+
+const TEMPORAL_MODES: Array<{ value: TemporalModeType; label: string; title: string }> = [
+  { value: 't1', label: 'T1', title: 'Show the earlier acquisition only' },
+  { value: 'swipe', label: 'Swipe', title: 'Split the viewport between T1 and T2' },
+  { value: 'fade', label: 'Fade', title: 'Cross-fade between T1 and T2' },
+  { value: 't2', label: 'T2', title: 'Show the later acquisition only' }
+];
+
+const LEGEND_ENTRIES: Array<{ label: string; swatch: string; meaning: string }> = [
+  {
+    label: 'Deep blue / black',
+    swatch: '#0b2545',
+    meaning: 'Water, wet soil, or radar shadow — very low reflectance.'
+  },
+  {
+    label: 'Green',
+    swatch: '#2f8f4e',
+    meaning: 'Healthy vegetation. Brighter means denser canopy.'
+  },
+  {
+    label: 'Grey / white',
+    swatch: '#b8c0cc',
+    meaning: 'Built-up surfaces, roads, bare rock, or cloud.'
+  },
+  {
+    label: 'Red outline',
+    swatch: '#ff3b30',
+    meaning: 'A region the change detector flagged between T1 and T2.'
+  }
+];
+
 export interface MapViewportProps {
+  /** Detections to draw, straight from the backend's visual_evidence. */
   geoJsonData?: any;
   datasetName?: string;
   sensor?: string;
-  overlay?: SentinelOverlay | null;
+  /** Explicit scene; falls back to whatever the workspace has loaded. */
+  overlay?: SceneOverlay | null;
+  /**
+   * A georeferenced raster produced by an analysis (e.g. the change mask),
+   * already warped to Web Mercator by the backend so its corners place it
+   * exactly.
+   */
+  resultOverlay?: ImageOverlayEvidence | null;
+  density?: MapDensity;
 }
 
-export const MapViewport: React.FC<MapViewportProps> = ({ geoJsonData, datasetName, sensor, overlay: propOverlay }) => {
-  const { activeOverlay: contextOverlay } = useTrace();
+export const MapViewport: React.FC<MapViewportProps> = ({
+  geoJsonData,
+  datasetName,
+  sensor,
+  overlay: propOverlay,
+  resultOverlay = null,
+  density = 'full'
+}) => {
+  const { overlay: contextOverlay } = useApp();
   const activeOverlay = propOverlay !== undefined ? propOverlay : contextOverlay;
 
   const mapContainerRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<maplibregl.Map | null>(null);
+  // Fullscreen targets the whole component, not just the WebGL canvas, so the
+  // controls come along with it.
+  const rootRef = useRef<HTMLDivElement>(null);
 
   // Basemap & Viewport State
   const [activeBaseLayer, setActiveBaseLayer] = useState<BaseLayerType>('satellite');
@@ -229,6 +326,16 @@ export const MapViewport: React.FC<MapViewportProps> = ({ geoJsonData, datasetNa
   const searchAbortControllerRef = useRef<AbortController | null>(null);
   const searchContainerRef = useRef<HTMLDivElement>(null);
   const [showBookmarks, setShowBookmarks] = useState<boolean>(false);
+  const [showLayers, setShowLayers] = useState<boolean>(false);
+  const [bhuvanThematicLayer, setBhuvanThematicLayer] = useState<string | null>(null);
+  const [showHeatmap, setShowHeatmap] = useState<boolean>(false);
+
+  // Interactive Map STAC/COG AOI Streamer State (Phase 2)
+  const [isAOIActive, setIsAOIActive] = useState<boolean>(false);
+  const [selectedBbox, setSelectedBbox] = useState<[number, number, number, number] | null>(null);
+  const [selectedAreaKm2, setSelectedAreaKm2] = useState<number>(0);
+  const [showFetchModal, setShowFetchModal] = useState<boolean>(false);
+  const [fetchedScene, setFetchedScene] = useState<FetchAOIResponse | null>(null);
 
   // Auto-switch basemap if SAR sensor is provided
   useEffect(() => {
@@ -247,6 +354,55 @@ export const MapViewport: React.FC<MapViewportProps> = ({ geoJsonData, datasetNa
     }, 750);
     return () => clearInterval(interval);
   }, [isBlinking]);
+
+  // 4. Update the MapLibre layers when visibility toggles change
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !map.isStyleLoaded()) return;
+    
+    // Original bounding box logic
+    const vis = showBoundingBoxes ? 'visible' : 'none';
+    if (map.getLayer('satquery-fill')) map.setLayoutProperty('satquery-fill', 'visibility', vis);
+    if (map.getLayer('satquery-glow')) map.setLayoutProperty('satquery-glow', 'visibility', vis);
+    if (map.getLayer('satquery-outline')) map.setLayoutProperty('satquery-outline', 'visibility', vis);
+    
+    // New heatmap logic
+    const heatVis = showHeatmap ? 'visible' : 'none';
+    if (map.getLayer('satquery-heatmap')) map.setLayoutProperty('satquery-heatmap', 'visibility', heatVis);
+    
+  }, [showBoundingBoxes, showHeatmap]);
+
+  // Sync Bhuvan Thematic Map Overlays
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !map.isStyleLoaded()) return;
+
+    const SOURCE_ID = 'bhuvan-thematic-source';
+    const LAYER_ID = 'bhuvan-thematic-layer';
+
+    // Always remove existing first to ensure tile URLs update
+    if (map.getLayer(LAYER_ID)) map.removeLayer(LAYER_ID);
+    if (map.getSource(SOURCE_ID)) map.removeSource(SOURCE_ID);
+
+    if (bhuvanThematicLayer) {
+      map.addSource(SOURCE_ID, {
+        type: 'raster',
+        tiles: [
+          `/bhuvan-wms?service=WMS&version=1.1.1&request=GetMap&layers=${bhuvanThematicLayer}&styles=&format=image/png&transparent=true&srs=EPSG:3857&bbox={bbox-epsg-3857}&width=256&height=256`
+        ],
+        tileSize: 256
+      });
+      map.addLayer({
+        id: LAYER_ID,
+        type: 'raster',
+        source: SOURCE_ID,
+        paint: {
+          'raster-opacity': 0.6
+        }
+      });
+    }
+  }, [bhuvanThematicLayer, activeBaseLayer]);
+
 
   // Helper to extract bounding box from arbitrary GeoJSON
   const getBounds = useCallback((geojson: any): [[number, number], [number, number]] | null => {
@@ -279,7 +435,7 @@ export const MapViewport: React.FC<MapViewportProps> = ({ geoJsonData, datasetNa
   // Update or mount Sentinel raster imagery layers onto MapLibre WebGL canvas
   const updateOverlayLayers = useCallback((
     map: maplibregl.Map,
-    ov: SentinelOverlay | null,
+    ov: SceneOverlay | null,
     opacity: number,
     mode: TemporalModeType,
     sliderVal: number,
@@ -501,10 +657,64 @@ export const MapViewport: React.FC<MapViewportProps> = ({ geoJsonData, datasetNa
     const emptyCollection = { type: 'FeatureCollection', features: [] };
     const sourceData = data || emptyCollection;
 
+    // Generate centroids for heatmap
+    const pointsData: any = {
+      type: 'FeatureCollection',
+      features: (sourceData.features || []).map((f: any) => {
+        let coords = f.geometry.coordinates;
+        if (f.geometry.type === 'Polygon') {
+          const ring = coords[0];
+          let sumLng = 0, sumLat = 0;
+          ring.forEach((c: any) => { sumLng += c[0]; sumLat += c[1]; });
+          coords = [sumLng / ring.length, sumLat / ring.length];
+        } else if (f.geometry.type === 'MultiPolygon') {
+          const ring = coords[0][0];
+          let sumLng = 0, sumLat = 0;
+          ring.forEach((c: any) => { sumLng += c[0]; sumLat += c[1]; });
+          coords = [sumLng / ring.length, sumLat / ring.length];
+        }
+        return {
+          type: 'Feature',
+          geometry: { type: 'Point', coordinates: coords },
+          properties: f.properties || {}
+        };
+      })
+    };
+
     if (!map.getSource('satquery-detections')) {
       map.addSource('satquery-detections', {
         type: 'geojson',
         data: sourceData
+      });
+      
+      map.addSource('satquery-centroids', {
+        type: 'geojson',
+        data: pointsData
+      });
+
+      // Heatmap layer
+      map.addLayer({
+        id: 'satquery-heatmap',
+        type: 'heatmap',
+        source: 'satquery-centroids',
+        layout: { visibility: 'none' }, // Toggled elsewhere
+        paint: {
+          'heatmap-weight': 1,
+          'heatmap-intensity': ['interpolate', ['linear'], ['zoom'], 0, 1, 15, 3],
+          'heatmap-color': [
+            'interpolate',
+            ['linear'],
+            ['heatmap-density'],
+            0, 'rgba(33,102,172,0)',
+            0.2, 'rgb(103,169,207)',
+            0.4, 'rgb(209,229,240)',
+            0.6, 'rgb(253,219,199)',
+            0.8, 'rgb(239,138,98)',
+            1, 'rgb(178,24,43)'
+          ],
+          'heatmap-radius': ['interpolate', ['linear'], ['zoom'], 0, 2, 15, 20],
+          'heatmap-opacity': 0.8
+        }
       });
 
       // Semi-transparent fill supporting feature properties (dynamic or fallback to cyan)
@@ -595,6 +805,9 @@ export const MapViewport: React.FC<MapViewportProps> = ({ geoJsonData, datasetNa
     } else {
       const source = map.getSource('satquery-detections') as maplibregl.GeoJSONSource;
       source.setData(sourceData);
+      
+      const centroidsSource = map.getSource('satquery-centroids') as maplibregl.GeoJSONSource;
+      if (centroidsSource) centroidsSource.setData(pointsData);
     }
   }, []);
 
@@ -622,7 +835,6 @@ export const MapViewport: React.FC<MapViewportProps> = ({ geoJsonData, datasetNa
     });
 
     mapRef.current = map;
-
     // Standard Scale Bar at bottom left
     const scale = new maplibregl.ScaleControl({
       maxWidth: 100,
@@ -650,6 +862,22 @@ export const MapViewport: React.FC<MapViewportProps> = ({ geoJsonData, datasetNa
     });
 
     map.on('load', () => {
+      // Created first so the detection outlines added next sit above it.
+      if (!map.getSource(RESULT_RASTER_SOURCE)) {
+        map.addSource(RESULT_RASTER_SOURCE, {
+          type: 'image',
+          url: TRANSPARENT_PIXEL,
+          coordinates: PLACEHOLDER_COORDS
+        });
+        map.addLayer({
+          id: RESULT_RASTER_LAYER,
+          type: 'raster',
+          source: RESULT_RASTER_SOURCE,
+          layout: { visibility: 'none' },
+          paint: { 'raster-opacity': 0.7, 'raster-fade-duration': 200 }
+        });
+      }
+
       ensureDetectionLayers(map, null);
       if (activeOverlay) {
         updateOverlayLayers(map, activeOverlay, overlayOpacity, temporalMode, temporalSlider, isOverlayVisible);
@@ -660,6 +888,20 @@ export const MapViewport: React.FC<MapViewportProps> = ({ geoJsonData, datasetNa
       map.remove();
       mapRef.current = null;
     };
+  }, []);
+
+  // 1b. Keep the WebGL canvas in step with its container. The map is embedded
+  // in a resizable, collapsible dock, so relying on window resize alone leaves
+  // it rendering at a stale size after a drag or a tab switch.
+  useEffect(() => {
+    const container = mapContainerRef.current;
+    if (!container || typeof ResizeObserver === 'undefined') return;
+
+    const observer = new ResizeObserver(() => {
+      mapRef.current?.resize();
+    });
+    observer.observe(container);
+    return () => observer.disconnect();
   }, []);
 
   // 2. React to activeOverlay updates (uploaded Sentinel images or selected presets)
@@ -803,6 +1045,32 @@ export const MapViewport: React.FC<MapViewportProps> = ({ geoJsonData, datasetNa
       const source = map.getSource('satquery-detections') as maplibregl.GeoJSONSource;
       if (source) {
         source.setData(targetGeoJson);
+        const centroidsSource = map.getSource('satquery-centroids') as maplibregl.GeoJSONSource;
+        if (centroidsSource) {
+          const pointsData: any = {
+            type: 'FeatureCollection',
+            features: (targetGeoJson.features || []).map((f: any) => {
+              let coords = f.geometry.coordinates;
+              if (f.geometry.type === 'Polygon') {
+                const ring = coords[0];
+                let sumLng = 0, sumLat = 0;
+                ring.forEach((c: any) => { sumLng += c[0]; sumLat += c[1]; });
+                coords = [sumLng / ring.length, sumLat / ring.length];
+              } else if (f.geometry.type === 'MultiPolygon') {
+                const ring = coords[0][0];
+                let sumLng = 0, sumLat = 0;
+                ring.forEach((c: any) => { sumLng += c[0]; sumLat += c[1]; });
+                coords = [sumLng / ring.length, sumLat / ring.length];
+              }
+              return {
+                type: 'Feature',
+                geometry: { type: 'Point', coordinates: coords },
+                properties: f.properties || {}
+              };
+            })
+          };
+          centroidsSource.setData(pointsData);
+        }
       } else {
         ensureDetectionLayers(map, targetGeoJson);
       }
@@ -870,6 +1138,56 @@ export const MapViewport: React.FC<MapViewportProps> = ({ geoJsonData, datasetNa
     }
   }, [geoJsonData, datasetName, getBounds, ensureDetectionLayers, activeOverlay]);
 
+  // 4b. Analysis raster overlay (change mask and similar).
+  //
+  // Update-only: the source and layer are created at map load (see above), so
+  // this never has to touch the style, which is what made every lazy attempt
+  // fail. The overlay also survives basemap switches for the same reason.
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map) return;
+
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+
+    const apply = (tries: number) => {
+      if (cancelled) return;
+
+      const source = map.getSource(RESULT_RASTER_SOURCE) as maplibregl.ImageSource | undefined;
+      if (!source || !map.getLayer(RESULT_RASTER_LAYER)) {
+        // Map is still initialising; the load handler will create them.
+        if (tries < 40) timer = setTimeout(() => apply(tries + 1), 150);
+        return;
+      }
+
+      if (!resultOverlay) {
+        map.setLayoutProperty(RESULT_RASTER_LAYER, 'visibility', 'none');
+        return;
+      }
+
+      const [minLng, minLat, maxLng, maxLat] = resultOverlay.bounds;
+      source.updateImage({
+        url: resultOverlay.url,
+        coordinates: [
+          [minLng, maxLat],
+          [maxLng, maxLat],
+          [maxLng, minLat],
+          [minLng, minLat]
+        ]
+      });
+
+      map.setPaintProperty(RESULT_RASTER_LAYER, 'raster-opacity', resultOverlay.opacity);
+      map.setLayoutProperty(RESULT_RASTER_LAYER, 'visibility', 'visible');
+    };
+
+    apply(0);
+
+    return () => {
+      cancelled = true;
+      if (timer) clearTimeout(timer);
+    };
+  }, [resultOverlay]);
+
   // 5. Basemap switching (Satellite, Hybrid, Streets, SAR)
   const handleBaseLayerChange = (layer: BaseLayerType) => {
     setActiveBaseLayer(layer);
@@ -885,9 +1203,27 @@ export const MapViewport: React.FC<MapViewportProps> = ({ geoJsonData, datasetNa
 
     // Re-attach all dynamic Sentinel raster and vector layers after basemap reload
     map.once('style.load', () => {
-      ensureDetectionLayers(map, geoJsonData);
-      if (activeOverlay) {
-        updateOverlayLayers(map, activeOverlay, overlayOpacity, temporalMode, temporalSlider, isOverlayVisible);
+      try {
+        if (!map.getSource(RESULT_RASTER_SOURCE)) {
+          map.addSource(RESULT_RASTER_SOURCE, {
+            type: 'image',
+            url: TRANSPARENT_PIXEL,
+            coordinates: PLACEHOLDER_COORDS
+          });
+          map.addLayer({
+            id: RESULT_RASTER_LAYER,
+            type: 'raster',
+            source: RESULT_RASTER_SOURCE,
+            layout: { visibility: 'none' },
+            paint: { 'raster-opacity': 0.7, 'raster-fade-duration': 200 }
+          });
+        }
+        ensureDetectionLayers(map, geoJsonData);
+        if (activeOverlay) {
+          updateOverlayLayers(map, activeOverlay, overlayOpacity, temporalMode, temporalSlider, isOverlayVisible);
+        }
+      } catch (err) {
+        console.warn('Post-style.load reattachment notice:', err);
       }
     });
   };
@@ -1091,13 +1427,21 @@ export const MapViewport: React.FC<MapViewportProps> = ({ geoJsonData, datasetNa
   };
 
   const toggleFullscreen = () => {
-    if (!mapContainerRef.current) return;
+    if (!rootRef.current) return;
     if (!document.fullscreenElement) {
-      mapContainerRef.current.requestFullscreen().then(() => setIsFullscreen(true)).catch(() => {});
+      rootRef.current.requestFullscreen().catch(() => {});
     } else {
-      document.exitFullscreen().then(() => setIsFullscreen(false)).catch(() => {});
+      document.exitFullscreen().catch(() => {});
     }
   };
+
+  // Track fullscreen from the browser rather than from the click, so pressing
+  // Escape keeps the button label honest.
+  useEffect(() => {
+    const sync = () => setIsFullscreen(document.fullscreenElement === rootRef.current);
+    document.addEventListener('fullscreenchange', sync);
+    return () => document.removeEventListener('fullscreenchange', sync);
+  }, []);
 
   // Compute CSS filter style for Band Visualization Presets
   const getBandFilterStyle = (): React.CSSProperties => {
@@ -1113,701 +1457,585 @@ export const MapViewport: React.FC<MapViewportProps> = ({ geoJsonData, datasetNa
     }
   };
 
+  const isCompact = density === 'compact';
+  const overlayOn = Boolean(activeOverlay) && isOverlayVisible && overlayOpacity > 0.01;
+  const readout = cursorCoords ?? centerCoords;
+
+  const closeMenus = () => {
+    setShowLayers(false);
+    setShowBookmarks(false);
+  };
+
   return (
-    <Panel variant="glass" className="h-full w-full relative flex flex-col overflow-hidden select-none border border-white/10">
-      {/* Top Telemetry & Control Bar */}
-      <div className="px-3 py-2 border-b border-white/10 bg-space-black/85 backdrop-blur-md flex flex-wrap items-center justify-between gap-2 z-20">
-        {/* Left Status & Title */}
-        <div className="flex items-center gap-2.5">
-          <div className="flex items-center gap-1.5 text-xs font-mono text-accent-cyan">
-            <Globe size={14} className="text-accent-cyan" />
-            <span className="font-semibold uppercase tracking-wider hidden sm:inline">SATQUERY MAP</span>
-          </div>
-
-          <div className="h-3.5 w-px bg-white/20 hidden md:block" />
-
-          <span className="text-[11px] font-mono text-slate-300 truncate max-w-[200px] lg:max-w-xs">
-            {detectionLabel}
-          </span>
-        </div>
-
-        {/* Center/Right: Quick Search & Bookmarks */}
-        <div className="flex items-center gap-2">
-          {/* Quick Search with Autocomplete Dropdown & Type-Aware Zoom */}
-          <div ref={searchContainerRef} className="relative">
-            <form onSubmit={handleSearchSubmit} className="relative flex items-center">
-              <input
-                type="text"
-                value={searchQuery}
-                onFocus={() => {
-                  if (searchResults.length > 0) setShowSearchResults(true);
-                }}
-                onChange={(e) => setSearchQuery(e.target.value)}
-                placeholder="Search city, state, country..."
-                className="bg-space-navy/90 border border-white/15 rounded-md pl-7 pr-7 py-1 text-[11px] font-mono text-white placeholder-slate-400 focus:outline-none focus:border-accent-cyan w-36 sm:w-48 md:w-56 lg:w-64 transition-all shadow-inner"
+    <div
+      ref={rootRef}
+      className="relative flex h-full min-h-0 w-full select-none flex-col overflow-hidden bg-surface-2"
+    >
+      {/* ------------------------------------------------------------------ */}
+      {/* Toolbar — search, layers, bookmarks. Everything else lives on the   */}
+      {/* canvas so the map keeps as much height as possible.                 */}
+      {/* ------------------------------------------------------------------ */}
+      <div className="flex h-10 shrink-0 items-center gap-1.5 border-b border-line bg-surface px-2">
+        <div ref={searchContainerRef} className="relative min-w-0 flex-1">
+          <form onSubmit={handleSearchSubmit} className="relative flex items-center">
+            {isSearching ? (
+              <Loader2
+                size={12}
+                className="pointer-events-none absolute left-2.5 animate-spin text-accent"
+                aria-hidden
               />
-              {isSearching ? (
-                <Loader2 size={12} className="absolute left-2 text-accent-cyan animate-spin pointer-events-none" />
-              ) : (
-                <Search size={12} className="absolute left-2 text-slate-400 pointer-events-none" />
-              )}
+            ) : (
+              <Search
+                size={12}
+                className="pointer-events-none absolute left-2.5 text-ink-faint"
+                aria-hidden
+              />
+            )}
+            <input
+              type="text"
+              value={searchQuery}
+              onFocus={() => {
+                if (searchResults.length > 0) setShowSearchResults(true);
+              }}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              placeholder={isCompact ? 'Search place or lat, lon' : 'Search a city, region, country, or "12.97, 77.59"'}
+              aria-label="Search for a location"
+              className="h-7 w-full rounded-md border border-line bg-surface-2 pl-7 pr-7 font-mono text-[11px] text-ink outline-none transition-colors placeholder:text-ink-faint focus:border-accent/50"
+            />
+            {searchQuery && (
+              <button
+                type="button"
+                aria-label="Clear search"
+                onClick={() => {
+                  setSearchQuery('');
+                  setSearchResults([]);
+                  setShowSearchResults(false);
+                }}
+                className="absolute right-1.5 cursor-pointer rounded p-0.5 text-ink-faint transition-colors hover:text-ink"
+              >
+                <X size={11} />
+              </button>
+            )}
+          </form>
 
-              {searchQuery && (
-                <button
-                  type="button"
-                  onClick={() => {
-                    setSearchQuery('');
-                    setSearchResults([]);
-                    setShowSearchResults(false);
-                  }}
-                  className="absolute right-2 text-slate-400 hover:text-white cursor-pointer p-0.5"
-                  title="Clear search"
-                >
-                  <X size={11} />
-                </button>
-              )}
-            </form>
-
-            {/* Suggestions Dropdown */}
-            {showSearchResults && searchResults.length > 0 && (
-              <div className="absolute left-0 top-full mt-1.5 w-72 sm:w-80 bg-space-black/95 border border-white/20 rounded-xl shadow-2xl py-1 z-50 backdrop-blur-xl max-h-72 overflow-y-auto">
-                <div className="px-3 py-1 text-[9px] font-mono uppercase tracking-wider text-slate-400 border-b border-white/10 flex justify-between items-center">
-                  <span>Geocoding Results ({searchResults.length})</span>
-                  <span className="text-[8px] text-accent-cyan">Auto-Zoom Hierarchy</span>
-                </div>
-
-                {searchResults.map((item) => {
-                  const getCategoryBadgeClass = (cat: LocationCategory) => {
-                    switch (cat) {
-                      case 'country':
-                        return 'bg-emerald-500/20 text-emerald-400 border-emerald-500/30';
-                      case 'state':
-                        return 'bg-sky-500/20 text-sky-400 border-sky-500/30';
-                      case 'city':
-                        return 'bg-purple-500/20 text-purple-400 border-purple-500/30';
-                      default:
-                        return 'bg-accent-cyan/20 text-accent-cyan border-accent-cyan/30';
-                    }
-                  };
-
-                  const getCategoryIcon = (cat: LocationCategory) => {
-                    switch (cat) {
-                      case 'country':
-                        return <Flag size={12} className="text-emerald-400 shrink-0 mt-0.5" />;
-                      case 'state':
-                        return <MapPin size={12} className="text-sky-400 shrink-0 mt-0.5" />;
-                      case 'city':
-                        return <Building2 size={12} className="text-purple-400 shrink-0 mt-0.5" />;
-                      default:
-                        return <Search size={12} className="text-accent-cyan shrink-0 mt-0.5" />;
-                    }
-                  };
-
-                  return (
+          {showSearchResults && searchResults.length > 0 && (
+            <ul className="scrollbar-slim absolute left-0 top-[calc(100%+6px)] z-50 max-h-72 w-full min-w-[16rem] overflow-y-auto rounded-xl border border-line-strong bg-surface-2 py-1 shadow-2xl">
+              {searchResults.map((item) => {
+                const tone =
+                  item.category === 'country'
+                    ? 'text-ok'
+                    : item.category === 'state'
+                      ? 'text-accent'
+                      : item.category === 'city'
+                        ? 'text-violet'
+                        : 'text-ink-muted';
+                const Icon =
+                  item.category === 'country' ? Flag : item.category === 'city' ? Building2 : MapPin;
+                return (
+                  <li key={item.id}>
                     <button
-                      key={item.id}
                       type="button"
                       onClick={() => selectSearchResult(item)}
-                      className="w-full text-left px-3 py-2 text-xs text-slate-200 hover:bg-accent-cyan/15 hover:text-white flex items-start gap-2.5 transition-colors border-b border-white/5 last:border-none cursor-pointer"
+                      className="flex w-full cursor-pointer items-start gap-2.5 px-2.5 py-1.5 text-left transition-colors hover:bg-surface-3"
                     >
-                      {getCategoryIcon(item.category)}
-                      <div className="flex-1 min-w-0">
-                        <div className="flex items-center justify-between gap-2">
-                          <span className="font-semibold truncate text-white">{item.name}</span>
-                          <span
-                            className={`text-[9px] font-mono px-1.5 py-0.2 rounded border ${getCategoryBadgeClass(
-                              item.category
-                            )} shrink-0`}
-                          >
+                      <Icon size={12} className={`mt-0.5 shrink-0 ${tone}`} aria-hidden />
+                      <span className="min-w-0 flex-1">
+                        <span className="flex items-center justify-between gap-2">
+                          <span className="truncate text-xs text-ink">{item.name}</span>
+                          <span className={`shrink-0 font-mono text-[9px] uppercase ${tone}`}>
                             {item.badgeLabel}
                           </span>
-                        </div>
-                        <p className="text-[10px] text-slate-400 truncate mt-0.5 font-sans">
+                        </span>
+                        <span className="mt-0.5 block truncate text-[10.5px] text-ink-faint">
                           {item.displayName}
-                        </p>
-                      </div>
+                        </span>
+                      </span>
                     </button>
-                  );
-                })}
-              </div>
-            )}
-          </div>
+                  </li>
+                );
+              })}
+            </ul>
+          )}
+        </div>
 
-          {/* Location Bookmark Dropdown */}
-          <div className="relative">
-            <button
-              type="button"
-              onClick={() => setShowBookmarks(!showBookmarks)}
-              className="flex items-center gap-1 px-2 py-1 bg-white/5 hover:bg-white/10 border border-white/10 rounded-md text-[10px] font-mono text-slate-300 transition-colors cursor-pointer"
-              title="Quick Jump Presets"
-            >
-              <MapPin size={11} className="text-accent-cyan" />
-              <span className="hidden sm:inline">Jump</span>
-            </button>
+        {/* Interactive Map STAC/COG AOI Streamer Tool Button */}
+        {ENABLE_AOI_FETCHER && (
+          <button
+            type="button"
+            onClick={() => setIsAOIActive(!isAOIActive)}
+            className={`inline-flex items-center gap-1.5 rounded-md px-2.5 py-1 text-xs font-mono transition-all cursor-pointer border ${
+              isAOIActive
+                ? 'bg-accent text-space-black font-semibold border-accent shadow-[0_0_10px_rgba(0,242,255,0.3)]'
+                : 'bg-surface-2 text-ink-muted border-line hover:border-accent/40 hover:text-accent'
+            }`}
+            title="Select an Area of Interest on the map to stream real satellite imagery"
+          >
+            <Crop size={12} />
+            <span className="hidden sm:inline">Select AOI</span>
+          </button>
+        )}
 
-            {showBookmarks && (
-              <div className="absolute right-0 top-full mt-1 w-52 bg-space-black/95 border border-white/15 rounded-lg shadow-2xl py-1 z-50 backdrop-blur-lg">
-                <div className="px-3 py-1 text-[9px] font-mono uppercase text-slate-400 border-b border-white/10">
-                  Select Location Bookmark
-                </div>
-                {PRESET_BOOKMARKS.map((b) => (
+        {/* Layers & rendering */}
+        <div className="relative">
+          <IconButton
+            label="Layers and rendering"
+            size="sm"
+            active={showLayers}
+            onClick={() => {
+              setShowLayers(!showLayers);
+              setShowBookmarks(false);
+            }}
+          >
+            <Layers size={13} />
+          </IconButton>
+
+          {showLayers && (
+            <div className="absolute right-0 top-[calc(100%+6px)] z-50 w-60 rounded-xl border border-line-strong bg-surface-2 p-3 shadow-2xl">
+              <p className="label-caps mb-2 text-ink-faint">Basemap</p>
+              <div className="grid grid-cols-2 gap-1">
+                {BASE_LAYERS.map((layer) => (
                   <button
-                    key={b.name}
+                    key={layer.value}
                     type="button"
-                    onClick={() => handleFlyToBookmark(b.coords, b.zoom, b.name)}
-                    className="w-full text-left px-3 py-1.5 text-xs text-slate-200 hover:bg-accent-cyan/15 hover:text-accent-cyan flex items-center justify-between transition-colors cursor-pointer"
+                    onClick={() => handleBaseLayerChange(layer.value)}
+                    className={`cursor-pointer rounded-md px-2 py-1.5 text-left text-[11.5px] transition-colors ${
+                      activeBaseLayer === layer.value
+                        ? 'bg-accent/15 text-accent'
+                        : 'text-ink-muted hover:bg-surface-3 hover:text-ink'
+                    }`}
                   >
-                    <span>{b.name}</span>
-                    <span className="text-[10px] font-mono text-slate-400">{b.zoom}x</span>
+                    {layer.label}
                   </button>
                 ))}
               </div>
-            )}
-          </div>
 
-          {/* Active Overlay Visibility Quick Toggle */}
-          {activeOverlay && (
-            <button
-              type="button"
-              onClick={() => setIsOverlayVisible(!isOverlayVisible)}
-              className={`flex items-center gap-1.5 px-2 py-1 rounded-md text-[10px] font-mono transition-all cursor-pointer border ${
-                isOverlayVisible && overlayOpacity > 0.01
-                  ? 'bg-accent-cyan/15 text-accent-cyan border-accent-cyan/40 shadow-[0_0_8px_rgba(0,242,255,0.25)]'
-                  : 'bg-white/5 text-slate-400 border-white/10 hover:text-white'
-              }`}
-              title={isOverlayVisible ? "Turn Sentinel overlay OFF" : "Turn Sentinel overlay ON"}
-            >
-              {isOverlayVisible && overlayOpacity > 0.01 ? (
-                <Eye size={12} className="text-accent-cyan" />
-              ) : (
-                <EyeOff size={12} />
+              <p className="label-caps mb-2 mt-3.5 text-ink-faint">Band rendering</p>
+              <div className="space-y-0.5">
+                {BAND_PRESETS.map((preset) => (
+                  <button
+                    key={preset.value}
+                    type="button"
+                    onClick={() => setBandPreset(preset.value)}
+                    className={`flex w-full cursor-pointer items-center justify-between rounded-md px-2 py-1.5 text-left text-[11.5px] transition-colors ${
+                      bandPreset === preset.value
+                        ? 'bg-accent/15 text-accent'
+                        : 'text-ink-muted hover:bg-surface-3 hover:text-ink'
+                    }`}
+                  >
+                    {preset.label}
+                    {bandPreset === preset.value && <Check size={11} aria-hidden />}
+                  </button>
+                ))}
+              </div>
+              
+              <p className="label-caps mb-2 mt-3.5 text-ink-faint">Bhuvan Thematic Overlays</p>
+              <div className="space-y-0.5">
+                {[
+                  { value: 'none', label: 'None' },
+                  { value: 'lulc:IN_LULC250K_1516', label: 'LULC (Land Use)' },
+                  { value: 'waterbody:IN_Waterbody', label: 'Water Bodies' }
+                ].map((layer) => (
+                  <button
+                    key={layer.value}
+                    type="button"
+                    onClick={() => setBhuvanThematicLayer(layer.value === 'none' ? null : layer.value)}
+                    className={`flex w-full cursor-pointer items-center justify-between rounded-md px-2 py-1.5 text-left text-[11.5px] transition-colors ${
+                      (bhuvanThematicLayer === layer.value || (layer.value === 'none' && !bhuvanThematicLayer))
+                        ? 'bg-accent/15 text-accent'
+                        : 'text-ink-muted hover:bg-surface-3 hover:text-ink'
+                    }`}
+                  >
+                    {layer.label}
+                    {(bhuvanThematicLayer === layer.value || (layer.value === 'none' && !bhuvanThematicLayer)) && <Check size={11} aria-hidden />}
+                  </button>
+                ))}
+              </div>
+
+              <div className="mt-3.5 space-y-1 border-t border-line pt-2.5">
+                <label className="flex cursor-pointer items-center justify-between text-[11.5px] text-ink-muted">
+                  <span>Detection outlines</span>
+                  <input
+                    type="checkbox"
+                    checked={showBoundingBoxes}
+                    onChange={(e) => setShowBoundingBoxes(e.target.checked)}
+                    className="h-3.5 w-3.5 accent-[var(--color-accent)]"
+                  />
+                </label>
+                <label className="flex cursor-pointer items-center justify-between text-[11.5px] text-ink-muted">
+                  <span>Detection density heatmap</span>
+                  <input
+                    type="checkbox"
+                    checked={showHeatmap}
+                    onChange={(e) => setShowHeatmap(e.target.checked)}
+                    className="h-3.5 w-3.5 accent-[var(--color-accent)]"
+                  />
+                </label>
+                <label className="flex cursor-pointer items-center justify-between text-[11.5px] text-ink-muted">
+                  <span>Centre reticle</span>
+                  <input
+                    type="checkbox"
+                    checked={showReticle}
+                    onChange={(e) => setShowReticle(e.target.checked)}
+                    className="h-3.5 w-3.5 accent-[var(--color-accent)]"
+                  />
+                </label>
+                {activeOverlay && (
+                  <label className="flex cursor-pointer items-center justify-between text-[11.5px] text-ink-muted">
+                    <span>Temporal controls</span>
+                    <input
+                      type="checkbox"
+                      checked={showOverlayControls}
+                      onChange={(e) => setShowOverlayControls(e.target.checked)}
+                      className="h-3.5 w-3.5 accent-[var(--color-accent)]"
+                    />
+                  </label>
+                )}
+              </div>
+
+              {activeOverlay && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setShowColorLegend(true);
+                    setShowLayers(false);
+                  }}
+                  className="mt-3 flex w-full cursor-pointer items-center gap-1.5 rounded-md border border-line px-2 py-1.5 text-[11.5px] text-ink-muted transition-colors hover:border-amber/40 hover:text-amber"
+                >
+                  <Palette size={12} aria-hidden />
+                  What do the colours mean?
+                </button>
               )}
-              <span className="hidden sm:inline">Overlay</span>
-              <span className="font-bold">{isOverlayVisible && overlayOpacity > 0.01 ? 'ON' : 'OFF'}</span>
-            </button>
+            </div>
           )}
+        </div>
 
-          {/* Spectral Color Guide Modal Trigger */}
-          {activeOverlay && (
-            <button
-              type="button"
-              onClick={() => setShowColorLegend(!showColorLegend)}
-              className={`flex items-center gap-1.5 px-2 py-1 rounded-md text-[10px] font-mono transition-all cursor-pointer border ${
-                showColorLegend
-                  ? 'bg-accent-warm/20 text-accent-warm border-accent-warm/40 shadow-[0_0_8px_rgba(255,170,0,0.3)]'
-                  : 'bg-white/5 text-slate-300 border-white/10 hover:text-white'
-              }`}
-              title="Spectral Color Guide: Learn what Red, Blue, Green, and Black mean"
-            >
-              <Palette size={12} className={showColorLegend ? "text-accent-warm" : "text-accent-cyan"} />
-              <span className="hidden md:inline">Color Guide</span>
-            </button>
+        {/* Location bookmarks */}
+        <div className="relative">
+          <IconButton
+            label="Jump to a location"
+            size="sm"
+            active={showBookmarks}
+            onClick={() => {
+              setShowBookmarks(!showBookmarks);
+              setShowLayers(false);
+            }}
+          >
+            <MapPin size={13} />
+          </IconButton>
+
+          {showBookmarks && (
+            <ul className="absolute right-0 top-[calc(100%+6px)] z-50 w-56 rounded-xl border border-line-strong bg-surface-2 py-1 shadow-2xl">
+              {PRESET_BOOKMARKS.map((bookmark) => (
+                <li key={bookmark.name}>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      handleFlyToBookmark(bookmark.coords, bookmark.zoom, bookmark.name);
+                      setShowBookmarks(false);
+                    }}
+                    className="flex w-full cursor-pointer items-center justify-between px-3 py-1.5 text-left text-[11.5px] text-ink-muted transition-colors hover:bg-surface-3 hover:text-ink"
+                  >
+                    <span className="truncate">{bookmark.name}</span>
+                    <span className="ml-2 shrink-0 font-mono text-[10px] text-ink-faint">
+                      z{bookmark.zoom}
+                    </span>
+                  </button>
+                </li>
+              ))}
+            </ul>
           )}
-
-          {/* Google Maps Style Basemap Switcher */}
-          <div className="flex items-center gap-0.5 bg-space-black/90 border border-white/15 p-0.5 rounded-lg text-[10px] font-mono">
-            {(['satellite', 'hybrid', 'streets', 'sar'] as BaseLayerType[]).map((layer) => (
-              <button
-                key={layer}
-                type="button"
-                onClick={() => handleBaseLayerChange(layer)}
-                className={`px-2 py-1 rounded transition-colors cursor-pointer capitalize ${
-                  activeBaseLayer === layer
-                    ? 'bg-accent-cyan text-space-black font-semibold shadow-sm'
-                    : 'text-slate-400 hover:text-white'
-                }`}
-              >
-                {layer === 'sar' ? 'SAR Dark' : layer}
-              </button>
-            ))}
-          </div>
         </div>
       </div>
 
-      {/* Main Map Canvas Area with Filter Effects */}
-      <div className="relative flex-1 bg-space-navy overflow-hidden">
-        {/* Real MapLibre WebGL Canvas */}
+      {/* ------------------------------------------------------------------ */}
+      {/* Canvas                                                              */}
+      {/* ------------------------------------------------------------------ */}
+      <div className="relative min-h-0 flex-1 overflow-hidden bg-surface-2" onClick={closeMenus}>
         <div
           ref={mapContainerRef}
           style={getBandFilterStyle()}
-          className="absolute inset-0 w-full h-full cursor-grab active:cursor-grabbing transition-all duration-300"
+          className="absolute inset-0 h-full w-full cursor-grab transition-[filter] duration-300 active:cursor-grabbing"
         />
 
-        {/* Optional HUD Reticle */}
         {showReticle && (
-          <div className="absolute inset-0 flex items-center justify-center pointer-events-none opacity-40">
-            <Crosshair size={90} className="text-accent-cyan stroke-[0.8]" />
+          <div className="pointer-events-none absolute inset-0 flex items-center justify-center opacity-30">
+            <Crosshair size={80} strokeWidth={0.7} className="text-accent" aria-hidden />
           </div>
         )}
 
-        {/* Top-Center Georeferenced Scene Telemetry Banner */}
-        {activeOverlay && activeOverlay.bounds && (
-          <div className="absolute top-3 left-1/2 -translate-x-1/2 z-10 pointer-events-auto">
-            <div className="bg-space-black/90 backdrop-blur-md border border-accent-cyan/40 px-3.5 py-1.5 rounded-lg text-[10px] font-mono text-white shadow-[0_0_20px_rgba(0,242,255,0.25)] flex items-center gap-3">
-              <div className="flex items-center gap-1.5 text-accent-cyan">
-                <Focus size={13} className="animate-pulse" />
-                <span className="font-bold uppercase tracking-wider">{activeOverlay.sensor.split(' ')[0]}</span>
-              </div>
-              <span className="text-white/30">|</span>
-              <span className="text-slate-300 font-medium truncate max-w-[150px] sm:max-w-xs">{activeOverlay.name}</span>
-              <span className="text-white/30 hidden sm:inline">|</span>
-              <span className="text-slate-400 hidden sm:inline">{activeOverlay.resolution}</span>
-              {activeOverlay.areaSqKm && (
-                <>
-                  <span className="text-white/30 hidden md:inline">|</span>
-                  <span className="text-accent-cyan hidden md:inline">{activeOverlay.areaSqKm} km²</span>
-                </>
-              )}
-              <button
-                type="button"
-                onClick={handleFlyToScene}
-                className="ml-1 px-2 py-0.5 rounded bg-accent-cyan/20 hover:bg-accent-cyan hover:text-space-black text-accent-cyan transition-colors cursor-pointer text-[9px] uppercase font-bold"
-                title="Fly directly to satellite image footprint"
+        {/* Scene identity + detection count, top-left. */}
+        {(activeOverlay || detectionCount > 0) && (
+          <div className="pointer-events-none absolute left-2.5 top-2.5 z-10 max-w-[calc(100%-5.5rem)]">
+            <div className="pointer-events-auto inline-flex max-w-full items-center gap-2 rounded-lg border border-line bg-ground/85 px-2.5 py-1.5 backdrop-blur-md">
+              <Globe size={12} className="shrink-0 text-accent" aria-hidden />
+              <span
+                className="truncate font-mono text-[10.5px] text-ink"
+                title={activeOverlay?.name ?? detectionLabel}
               >
-                Center Scene
-              </button>
-            </div>
-          </div>
-        )}
-
-        {/* Live Telemetry HUD (Top Left) */}
-        <div className="absolute top-3 left-3 flex flex-col gap-1.5 z-10 pointer-events-none">
-          <div className="bg-space-black/85 backdrop-blur-md border border-white/10 px-3 py-2 rounded-lg text-[10px] font-mono text-slate-300 shadow-xl space-y-1 pointer-events-auto min-w-[170px]">
-            {cursorCoords ? (
-              <div className="flex justify-between gap-3 border-b border-white/10 pb-1">
-                <span className="text-accent-cyan font-semibold">CURSOR</span>
-                <span className="text-accent-cyan">{cursorCoords.lat}°N, {cursorCoords.lng}°E</span>
-              </div>
-            ) : (
-              <div className="flex justify-between gap-3 border-b border-white/10 pb-1">
-                <span className="text-white/40">CENTER</span>
-                <span>{centerCoords.lat}°N, {centerCoords.lng}°E</span>
-              </div>
-            )}
-            <div className="flex justify-between gap-3">
-              <span className="text-white/40">ZOOM</span>
-              <span>{zoomLevel}x</span>
-            </div>
-            <div className="flex justify-between gap-3">
-              <span className="text-white/40">PITCH / TILT</span>
-              <span>{pitch}°</span>
-            </div>
-            <div
-              onClick={() => activeOverlay && setIsOverlayVisible(!isOverlayVisible)}
-              className={`flex justify-between gap-3 ${activeOverlay ? 'cursor-pointer hover:text-accent-cyan transition-colors' : ''}`}
-              title={activeOverlay ? 'Click to toggle overlay visibility' : undefined}
-            >
-              <span className="text-white/40 flex items-center gap-1">
-                OVERLAY
-                {activeOverlay && (
-                  isOverlayVisible && overlayOpacity > 0.01 ? (
-                    <Eye size={10} className="text-accent-cyan" />
-                  ) : (
-                    <EyeOff size={10} className="text-slate-500" />
-                  )
-                )}
+                {activeOverlay?.name ?? detectionLabel}
               </span>
-              <span className={activeOverlay && isOverlayVisible && overlayOpacity > 0.01 ? 'text-accent-cyan font-semibold' : 'text-slate-500 font-semibold'}>
-                {activeOverlay
-                  ? !isOverlayVisible
-                    ? 'OFF (Hidden)'
-                    : overlayOpacity <= 0.01
-                    ? '0% (Hidden)'
-                    : `${Math.round(overlayOpacity * 100)}%`
-                  : 'None'}
-              </span>
-            </div>
-          </div>
-        </div>
-
-        {/* Floating Google Maps-Style Control Stack (Top Right) */}
-        <div className="absolute top-3 right-3 flex flex-col gap-1.5 z-10">
-          <div className="bg-space-black/85 backdrop-blur-md border border-white/10 rounded-lg p-1 flex flex-col gap-1 text-slate-300 shadow-xl">
-            {/* Zoom In */}
-            <button
-              type="button"
-              onClick={handleZoomIn}
-              className="p-1.5 hover:bg-white/10 hover:text-accent-cyan rounded transition-colors cursor-pointer"
-              title="Zoom in (+)"
-            >
-              <ZoomIn size={16} />
-            </button>
-
-            {/* Zoom Out */}
-            <button
-              type="button"
-              onClick={handleZoomOut}
-              className="p-1.5 hover:bg-white/10 hover:text-accent-cyan rounded transition-colors cursor-pointer"
-              title="Zoom out (-)"
-            >
-              <ZoomOut size={16} />
-            </button>
-
-            <div className="h-px bg-white/10 mx-1" />
-
-            {/* Compass / Reset North & Tilt */}
-            <button
-              type="button"
-              onClick={handleResetNorthPitch}
-              className="p-1.5 hover:bg-white/10 hover:text-accent-cyan rounded transition-transform cursor-pointer relative flex items-center justify-center"
-              title="Reset North & 2D Flat View"
-            >
-              <div style={{ transform: `rotate(${-bearing}deg)` }} className="transition-transform duration-150">
-                <Compass size={16} className={bearing !== 0 ? 'text-accent-cyan' : 'text-slate-400'} />
-              </div>
-            </button>
-
-            {/* Locate Me (GPS) */}
-            <button
-              type="button"
-              onClick={handleLocateMe}
-              className="p-1.5 hover:bg-white/10 hover:text-accent-cyan rounded transition-colors cursor-pointer"
-              title="Fly to My Current Location"
-            >
-              <Locate size={16} />
-            </button>
-
-            {/* Reticle Toggle */}
-            <button
-              type="button"
-              onClick={() => setShowReticle(!showReticle)}
-              className={`p-1.5 hover:bg-white/10 rounded transition-colors cursor-pointer ${
-                showReticle ? 'text-accent-cyan bg-accent-cyan/15' : 'text-slate-400'
-              }`}
-              title="Toggle HUD Crosshair Reticle"
-            >
-              <Crosshair size={16} />
-            </button>
-
-            {/* Overlay Controls Toggle */}
-            {activeOverlay && (
-              <button
-                type="button"
-                onClick={() => setShowOverlayControls(!showOverlayControls)}
-                className={`p-1.5 hover:bg-white/10 rounded transition-colors cursor-pointer ${
-                  showOverlayControls ? 'text-accent-cyan bg-accent-cyan/15' : 'text-slate-400'
-                }`}
-                title="Toggle Sentinel Overlay Controls"
-              >
-                <Sliders size={16} />
-              </button>
-            )}
-
-            <div className="h-px bg-white/10 mx-1" />
-
-            {/* Fullscreen Toggle */}
-            <button
-              type="button"
-              onClick={toggleFullscreen}
-              className="p-1.5 hover:bg-white/10 hover:text-accent-cyan rounded transition-colors cursor-pointer"
-              title={isFullscreen ? 'Exit Fullscreen' : 'Fullscreen Map'}
-            >
-              {isFullscreen ? <Minimize2 size={16} /> : <Maximize2 size={16} />}
-            </button>
-          </div>
-        </div>
-
-        {/* WOW FACTOR: Multi-Temporal Before/After Swipe & Blend Control Dock (Bottom Center) */}
-        {activeOverlay && showOverlayControls && (
-          <div className="absolute bottom-4 left-1/2 -translate-x-1/2 z-10 w-11/12 max-w-xl">
-            <div className="bg-space-black/95 backdrop-blur-xl border border-white/20 p-2.5 rounded-xl shadow-2xl space-y-2">
-              {/* Top Row: Temporal Mode Switcher & Opacity */}
-              <div className="flex flex-wrap items-center justify-between gap-2 text-[10px] font-mono">
-                {/* Mode Selector */}
-                <div className="flex items-center gap-1.5">
-                  <span className="text-slate-400 uppercase tracking-wider flex items-center gap-1">
-                    <Layers size={11} className="text-accent-cyan" />
-                    Mode:
-                  </span>
-
-                  {activeOverlay.mode === 'bi-temporal' && activeOverlay.t2ImageUrl ? (
-                    <div className="flex items-center gap-0.5 bg-white/5 p-0.5 rounded-lg border border-white/10">
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setTemporalMode('fade');
-                          setIsBlinking(false);
-                        }}
-                        className={`px-2 py-0.5 rounded transition-colors cursor-pointer ${
-                          temporalMode === 'fade' && !isBlinking
-                            ? 'bg-accent-cyan text-space-black font-semibold'
-                            : 'text-slate-400 hover:text-white'
-                        }`}
-                      >
-                        Swipe/Blend
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setTemporalMode('t1');
-                          setIsBlinking(false);
-                        }}
-                        className={`px-2 py-0.5 rounded transition-colors cursor-pointer ${
-                          temporalMode === 't1' && !isBlinking
-                            ? 'bg-accent-cyan text-space-black font-semibold'
-                            : 'text-slate-400 hover:text-white'
-                        }`}
-                      >
-                        T1 (Pre)
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setTemporalMode('t2');
-                          setIsBlinking(false);
-                        }}
-                        className={`px-2 py-0.5 rounded transition-colors cursor-pointer ${
-                          temporalMode === 't2' && !isBlinking
-                            ? 'bg-accent-cyan text-space-black font-semibold'
-                            : 'text-slate-400 hover:text-white'
-                        }`}
-                      >
-                        T2 (Post)
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => setIsBlinking(!isBlinking)}
-                        className={`px-2 py-0.5 rounded transition-colors cursor-pointer flex items-center gap-1 ${
-                          isBlinking
-                            ? 'bg-accent-warm text-space-black font-bold animate-pulse'
-                            : 'text-slate-400 hover:text-white'
-                        }`}
-                        title="Blink comparison toggles T1 and T2 at 1.2Hz"
-                      >
-                        {isBlinking ? <Pause size={10} /> : <Play size={10} />}
-                        Blink
-                      </button>
-                    </div>
-                  ) : (
-                    <span className="text-accent-cyan font-semibold">Single Georeferenced Scene</span>
-                  )}
-                </div>
-
-                {/* Opacity Slider & Quick Toggle */}
-                <div className="flex items-center gap-2">
-                  <button
-                    type="button"
-                    onClick={() => setIsOverlayVisible(!isOverlayVisible)}
-                    className={`px-1.5 py-0.5 rounded text-[9px] font-mono flex items-center gap-1 cursor-pointer transition-colors ${
-                      isOverlayVisible && overlayOpacity > 0.01
-                        ? 'bg-accent-cyan/20 text-accent-cyan border border-accent-cyan/40'
-                        : 'bg-white/10 text-slate-400 border border-white/10 hover:text-white'
-                    }`}
-                    title={isOverlayVisible ? 'Turn overlay OFF' : 'Turn overlay ON'}
-                  >
-                    {isOverlayVisible && overlayOpacity > 0.01 ? <Eye size={10} /> : <EyeOff size={10} />}
-                    <span>{isOverlayVisible && overlayOpacity > 0.01 ? 'ON' : 'OFF'}</span>
-                  </button>
-
-                  <span className="text-slate-400">Opacity:</span>
-                  <input
-                    type="range"
-                    min="0"
-                    max="100"
-                    value={isOverlayVisible ? Math.round(overlayOpacity * 100) : 0}
-                    onChange={(e) => {
-                      const val = parseFloat(e.target.value) / 100;
-                      setOverlayOpacity(val);
-                      if (!isOverlayVisible && val > 0) setIsOverlayVisible(true);
-                    }}
-                    className="w-20 accent-accent-cyan cursor-pointer"
-                  />
-                  <span className="text-accent-cyan w-7 text-right">
-                    {!isOverlayVisible ? '0%' : `${Math.round(overlayOpacity * 100)}%`}
-                  </span>
-                </div>
-              </div>
-
-              {/* Bottom Row: Bi-Temporal Split Swipe Slider (if bi-temporal) */}
-              {activeOverlay.mode === 'bi-temporal' && activeOverlay.t2ImageUrl && (
-                <div className="pt-1 border-t border-white/10 flex items-center gap-3">
-                  <span className="text-[10px] font-mono text-slate-400 shrink-0 flex items-center gap-1">
-                    <ArrowLeftRight size={11} className="text-accent-cyan" />
-                    T1 (Before)
-                  </span>
-
-                  <div className="relative flex-1 flex items-center">
-                    <input
-                      type="range"
-                      min="0"
-                      max="100"
-                      value={temporalSlider}
-                      onChange={(e) => {
-                        setTemporalSlider(parseFloat(e.target.value));
-                        if (temporalMode !== 'fade') setTemporalMode('fade');
-                      }}
-                      className="w-full accent-accent-cyan cursor-pointer h-2 bg-space-navy rounded-lg"
-                    />
-                  </div>
-
-                  <span className="text-[10px] font-mono text-slate-400 shrink-0">
-                    T2 (After)
-                  </span>
-                </div>
-              )}
-
-              {/* Band Visualization Presets Pill Box */}
-              <div className="pt-1 border-t border-white/10 flex items-center justify-between text-[9px] font-mono">
-                <span className="text-slate-400 flex items-center gap-1">
-                  <Sparkles size={11} className="text-accent-warm" />
-                  Band Mode:
+              {detectionCount > 0 && (
+                <span className="shrink-0 rounded bg-accent/15 px-1.5 py-0.5 font-mono text-[9.5px] text-accent">
+                  {detectionCount} region{detectionCount === 1 ? '' : 's'}
                 </span>
-                <div className="flex items-center gap-1">
-                  {(
-                    [
-                      ['true-color', 'RGB True Color'],
-                      ['false-color-nir', 'NIR Infrared (Canopy)'],
-                      ['sar-contrast', 'SAR Radar Facets'],
-                      ['edge-boost', 'Edge Boost']
-                    ] as [BandFilterType, string][]
-                  ).map(([presetKey, label]) => (
-                    <button
-                      key={presetKey}
-                      type="button"
-                      onClick={() => setBandPreset(presetKey)}
-                      className={`px-1.5 py-0.5 rounded transition-colors cursor-pointer ${
-                        bandPreset === presetKey
-                          ? 'bg-white/20 text-white font-semibold border border-white/30'
-                          : 'text-slate-400 hover:text-slate-200'
-                      }`}
-                    >
-                      {label}
-                    </button>
-                  ))}
-                </div>
-              </div>
+              )}
             </div>
           </div>
         )}
 
-        {/* Corner Coordinates HUD Chips (Only when overlay is active and visible) */}
-        {activeOverlay?.bounds && isOverlayVisible && overlayOpacity > 0.01 && (
-          <>
-            {/* Top-Left: NW */}
-            <div className="absolute top-16 left-3 z-10 pointer-events-none hidden sm:block">
-              <div className="bg-space-black/75 border border-accent-cyan/30 px-1.5 py-0.5 rounded text-[9px] font-mono text-slate-300 backdrop-blur">
-                NW: {activeOverlay.bounds[3].toFixed(4)}°N, {activeOverlay.bounds[0].toFixed(4)}°E
-              </div>
-            </div>
-            {/* Bottom-Left: SW */}
-            <div className="absolute bottom-16 left-3 z-10 pointer-events-none hidden sm:block">
-              <div className="bg-space-black/75 border border-accent-cyan/30 px-1.5 py-0.5 rounded text-[9px] font-mono text-slate-300 backdrop-blur">
-                SW: {activeOverlay.bounds[1].toFixed(4)}°N, {activeOverlay.bounds[0].toFixed(4)}°E
-              </div>
-            </div>
-          </>
-        )}
-
-        {/* Remote Sensing Spectral Color Legend Modal */}
-        {showColorLegend && (
-          <div className="absolute top-14 right-3 md:right-16 z-30 w-84 max-w-[calc(100vw-2rem)] bg-space-black/95 backdrop-blur-xl border border-accent-cyan/30 rounded-xl shadow-2xl p-3.5 text-white font-mono animate-in fade-in zoom-in-95 duration-200">
-            <div className="flex items-center justify-between border-b border-white/10 pb-2 mb-2.5">
-              <div className="flex items-center gap-2 text-xs font-bold text-accent-cyan">
-                <Palette size={14} />
-                <span>SENTINEL SPECTRAL COLOR GUIDE</span>
-              </div>
-              <button
-                type="button"
-                onClick={() => setShowColorLegend(false)}
-                className="text-slate-400 hover:text-white p-0.5 rounded cursor-pointer"
-              >
-                <X size={14} />
-              </button>
-            </div>
-
-            <p className="text-[10px] text-slate-300 leading-relaxed mb-3">
-              Satellite multi-spectral sensors capture wavelengths beyond human vision (e.g. Near-Infrared B8, Shortwave Infrared). Here is what the overlay colors indicate:
-            </p>
-
-            <div className="space-y-2 text-[10px]">
-              <div className="flex items-start gap-2.5 bg-red-500/10 border border-red-500/30 rounded-lg p-2">
-                <span className="w-3 h-3 rounded-full bg-red-500 shadow-[0_0_8px_rgba(239,68,68,0.8)] shrink-0 mt-0.5" />
-                <div>
-                  <div className="font-bold text-red-400">RED / CRIMSON / PINK</div>
-                  <div className="text-slate-300">
-                    <span className="font-semibold text-white">Dense Healthy Vegetation & Canopy:</span> Living plant chlorophyll strongly reflects Near-Infrared (NIR / Band 8). In standard Color-Infrared (CIR) composites, farmlands, forest reserves (Delhi Ridge), and parks glow bright red.
-                  </div>
-                </div>
-              </div>
-
-              <div className="flex items-start gap-2.5 bg-cyan-500/10 border border-cyan-500/30 rounded-lg p-2">
-                <span className="w-3 h-3 rounded-full bg-cyan-400 shadow-[0_0_8px_rgba(34,211,238,0.8)] shrink-0 mt-0.5" />
-                <div>
-                  <div className="font-bold text-cyan-300">CYAN / SLATE BLUE / GRAY</div>
-                  <div className="text-slate-300">
-                    <span className="font-semibold text-white">Urban Infrastructure & Concrete:</span> Impervious surfaces, buildings, asphalt roadways, airport runways, and industrial complexes reflect visible light evenly without vegetative NIR reflectance.
-                  </div>
-                </div>
-              </div>
-
-              <div className="flex items-start gap-2.5 bg-blue-950/40 border border-blue-500/30 rounded-lg p-2">
-                <span className="w-3 h-3 rounded-full bg-blue-900 border border-blue-400 shadow-[0_0_8px_rgba(59,130,246,0.6)] shrink-0 mt-0.5" />
-                <div>
-                  <div className="font-bold text-blue-300">DEEP NAVY / BLACK</div>
-                  <div className="text-slate-300">
-                    <span className="font-semibold text-white">Open Water Bodies:</span> Clear water absorbs Near-Infrared radiation completely, resulting in deep navy or black signatures for the Yamuna River, reservoirs, and lakes.
-                  </div>
-                </div>
-              </div>
-
-              <div className="flex items-start gap-2.5 bg-amber-500/10 border border-amber-500/30 rounded-lg p-2">
-                <span className="w-3 h-3 rounded-full bg-amber-400 shadow-[0_0_8px_rgba(251,191,36,0.8)] shrink-0 mt-0.5" />
-                <div>
-                  <div className="font-bold text-amber-300">OCHRE / TAN / BROWN</div>
-                  <div className="text-slate-300">
-                    <span className="font-semibold text-white">Bare Soil & Sand:</span> Fallow agricultural ground, desert sands, construction excavations, and river sediment deposits.
-                  </div>
-                </div>
-              </div>
-            </div>
-
-            <div className="mt-3 pt-2 border-t border-white/10 flex justify-between items-center text-[9px] text-slate-400">
-              <span>Sentinel-2 MSI (B4, B3, B2, B8)</span>
-              <button
-                type="button"
-                onClick={() => setShowColorLegend(false)}
-                className="text-accent-cyan hover:underline cursor-pointer"
-              >
-                Close Guide
-              </button>
-            </div>
-          </div>
-        )}
-
-        {/* Global Explorer Telemetry Badge (Bottom Right) */}
-        <div className="absolute bottom-4 right-4 z-10 hidden sm:block">
-          <div className="bg-space-black/85 backdrop-blur-md border border-white/10 px-3 py-1.5 rounded-lg text-[10px] font-mono text-white/70 shadow-xl flex items-center gap-2.5">
-            <div
-              className={`w-2 h-2 rounded-full ${
-                activeOverlay ? 'bg-accent-cyan animate-pulse shadow-[0_0_8px_rgba(0,242,255,0.8)]' : 'bg-accent-teal'
-              }`}
+        {/* Navigation stack, top-right. */}
+        <div className="absolute right-2.5 top-2.5 z-10 flex flex-col gap-1">
+          <IconButton label="Zoom in" size="sm" onClick={handleZoomIn}>
+            <ZoomIn size={13} />
+          </IconButton>
+          <IconButton label="Zoom out" size="sm" onClick={handleZoomOut}>
+            <ZoomOut size={13} />
+          </IconButton>
+          <IconButton
+            label={`Reset bearing (${Math.round(bearing)}°) and tilt`}
+            size="sm"
+            onClick={handleResetNorthPitch}
+          >
+            <Compass
+              size={13}
+              style={{ transform: `rotate(${-bearing}deg)` }}
+              className="transition-transform"
             />
-            <span>
-              {activeOverlay ? `Sentinel Overlay • ${activeOverlay.sensor.split(' ')[0]}` : 'Global Slippy Map'}
-            </span>
+          </IconButton>
+          {activeOverlay && (
+            <IconButton label="Fit to loaded scene" size="sm" onClick={handleFlyToScene}>
+              <Focus size={13} />
+            </IconButton>
+          )}
+          {!isCompact && (
+            <IconButton label="Centre on my location" size="sm" onClick={handleLocateMe}>
+              <Locate size={13} />
+            </IconButton>
+          )}
+          <IconButton
+            label={isFullscreen ? 'Exit fullscreen' : 'Fullscreen map'}
+            size="sm"
+            active={isFullscreen}
+            onClick={toggleFullscreen}
+          >
+            {isFullscreen ? <Minimize2 size={13} /> : <Maximize2 size={13} />}
+          </IconButton>
+        </div>
 
-            {detectionCount > 0 && (
+        {/* Coordinate readout, bottom-left. */}
+        <div className="pointer-events-none absolute bottom-2.5 left-2.5 z-10">
+          <div className="rounded-md border border-line bg-ground/85 px-2 py-1 font-mono text-[10px] text-ink-muted backdrop-blur-md">
+            <span className="mr-1.5 font-semibold text-accent/80">NavIC / WGS84:</span>
+            <span className={cursorCoords ? 'text-accent' : undefined}>
+              {readout.lat}°, {readout.lng}°
+            </span>
+            <span className="mx-1.5 text-ink-faint" aria-hidden>
+              |
+            </span>
+            <span>z{zoomLevel}</span>
+            {pitch > 0 && (
               <>
-                <span className="text-white/30">|</span>
-                <button
-                  type="button"
-                  onClick={() => setShowBoundingBoxes(!showBoundingBoxes)}
-                  className={`px-1.5 py-0.5 rounded cursor-pointer transition-colors ${
-                    showBoundingBoxes ? 'bg-accent-cyan/20 text-accent-cyan' : 'text-slate-500 line-through'
-                  }`}
-                  title="Toggle AI visual detection boundaries"
-                >
-                  AI Targets: {detectionCount}
-                </button>
+                <span className="mx-1.5 text-ink-faint" aria-hidden>
+                  |
+                </span>
+                <span>{pitch}° tilt</span>
               </>
             )}
-
-            <span className="text-white/30">|</span>
-            <span className="text-slate-400">MapLibre WebGL</span>
           </div>
         </div>
+
+        {/* --------------------------------------------------------------- */}
+        {/* Temporal / opacity dock — only meaningful with a scene loaded.   */}
+        {/* --------------------------------------------------------------- */}
+        {activeOverlay && showOverlayControls && (
+          <div className="absolute bottom-2.5 left-1/2 z-10 w-[min(30rem,calc(100%-1.25rem))] -translate-x-1/2">
+            <div className="rounded-xl border border-line bg-ground/90 p-2 shadow-2xl backdrop-blur-md">
+              <div className="flex items-center gap-2">
+                {activeOverlay.mode === 'bi-temporal' ? (
+                  <div className="flex items-center gap-0.5 rounded-lg border border-line bg-surface/80 p-0.5">
+                    {TEMPORAL_MODES.map((mode) => (
+                      <button
+                        key={mode.value}
+                        type="button"
+                        title={mode.title}
+                        onClick={() => setTemporalMode(mode.value)}
+                        className={`cursor-pointer rounded-[6px] px-2 py-1 font-mono text-[10px] uppercase tracking-wide transition-colors ${
+                          temporalMode === mode.value
+                            ? 'bg-accent/15 text-accent'
+                            : 'text-ink-faint hover:text-ink'
+                        }`}
+                      >
+                        {mode.label}
+                      </button>
+                    ))}
+                  </div>
+                ) : (
+                  <span className="label-caps text-ink-faint">Overlay</span>
+                )}
+
+                {activeOverlay.mode === 'bi-temporal' && (
+                  <IconButton
+                    label={isBlinking ? 'Stop blink comparison' : 'Blink between T1 and T2'}
+                    size="sm"
+                    active={isBlinking}
+                    onClick={() => setIsBlinking(!isBlinking)}
+                  >
+                    {isBlinking ? <Pause size={12} /> : <Play size={12} />}
+                  </IconButton>
+                )}
+
+                <div className="ml-auto flex min-w-0 flex-1 items-center gap-1.5">
+                  <IconButton
+                    label={overlayOn ? 'Hide imagery overlay' : 'Show imagery overlay'}
+                    size="sm"
+                    active={overlayOn}
+                    onClick={() => setIsOverlayVisible(!isOverlayVisible)}
+                  >
+                    {overlayOn ? <Eye size={12} /> : <EyeOff size={12} />}
+                  </IconButton>
+                  <input
+                    type="range"
+                    min={0}
+                    max={100}
+                    value={Math.round(overlayOpacity * 100)}
+                    aria-label="Overlay opacity"
+                    onChange={(e) => setOverlayOpacity(parseFloat(e.target.value) / 100)}
+                    className="min-w-0 flex-1"
+                  />
+                  <span className="w-8 shrink-0 text-right font-mono text-[10px] text-ink-muted">
+                    {Math.round(overlayOpacity * 100)}%
+                  </span>
+                </div>
+              </div>
+
+              {activeOverlay.mode === 'bi-temporal' &&
+                (temporalMode === 'swipe' || temporalMode === 'fade') && (
+                  <div className="mt-2 flex items-center gap-2 border-t border-line pt-2">
+                    <span className="shrink-0 font-mono text-[10px] text-ink-faint">T1</span>
+                    <input
+                      type="range"
+                      min={0}
+                      max={100}
+                      value={temporalSlider}
+                      aria-label={temporalMode === 'swipe' ? 'Swipe position' : 'Blend between T1 and T2'}
+                      onChange={(e) => {
+                        setIsBlinking(false);
+                        setTemporalSlider(parseInt(e.target.value, 10));
+                      }}
+                      className="min-w-0 flex-1"
+                    />
+                    <span className="shrink-0 font-mono text-[10px] text-ink-faint">T2</span>
+                    <ArrowLeftRight size={11} className="shrink-0 text-accent" aria-hidden />
+                  </div>
+                )}
+            </div>
+          </div>
+        )}
+
+        {/* Spectral legend */}
+        {showColorLegend && (
+          <div className="absolute inset-0 z-30 flex items-center justify-center bg-ground/70 p-4 backdrop-blur-sm">
+            <div className="w-full max-w-sm rounded-panel border border-line-strong bg-surface-2 p-4 shadow-2xl">
+              <div className="mb-3 flex items-start justify-between gap-3">
+                <div>
+                  <h4 className="text-sm font-medium text-ink">Reading the imagery</h4>
+                  <p className="mt-0.5 text-[11.5px] text-ink-faint">
+                    {bandPreset === 'true-color' ? 'True colour' : 'False colour / enhanced'} rendering
+                  </p>
+                </div>
+                <IconButton
+                  label="Close legend"
+                  size="sm"
+                  onClick={() => setShowColorLegend(false)}
+                >
+                  <X size={13} />
+                </IconButton>
+              </div>
+
+              <ul className="space-y-1.5">
+                {LEGEND_ENTRIES.map((entry) => (
+                  <li key={entry.label} className="flex items-start gap-2.5">
+                    <span
+                      className="mt-0.5 h-3 w-3 shrink-0 rounded-sm border border-line"
+                      style={{ background: entry.swatch }}
+                      aria-hidden
+                    />
+                    <span className="min-w-0">
+                      <span className="block text-[12px] text-ink">{entry.label}</span>
+                      <span className="block text-[11px] leading-snug text-ink-faint">
+                        {entry.meaning}
+                      </span>
+                    </span>
+                  </li>
+                ))}
+              </ul>
+
+              <p className="mt-3 border-t border-line pt-2.5 font-mono text-[10px] leading-relaxed text-ink-faint">
+                Change polygons drawn by the detector are outlined in red and
+                carry their area in hectares — click one on the map to inspect it.
+              </p>
+            </div>
+          </div>
+        )}
+
+        {/* Interactive Map AOI Selector, Modal, and Chatbot Handoff (Phase 2) */}
+        {ENABLE_AOI_FETCHER && (
+          <>
+            <AOIBoxSelector
+              map={mapRef.current}
+              isActive={isAOIActive}
+              onCancel={() => setIsAOIActive(false)}
+              onSelectBbox={(bbox, area) => {
+                setSelectedBbox(bbox);
+                setSelectedAreaKm2(area);
+                setIsAOIActive(false);
+                setShowFetchModal(true);
+              }}
+            />
+
+            <AOIFetchModal
+              bbox={selectedBbox}
+              areaKm2={selectedAreaKm2}
+              isOpen={showFetchModal}
+              onClose={() => setShowFetchModal(false)}
+              onSuccess={(response) => {
+                setShowFetchModal(false);
+                setFetchedScene(response);
+                // Also fly to and align map with the fetched scene overlay
+                const newOverlay = aoiResponseToSceneOverlay(response);
+                if (mapRef.current && newOverlay.bounds && newOverlay.bounds.length === 4) {
+                  const [minLng, minLat, maxLng, maxLat] = newOverlay.bounds;
+                  if (
+                    typeof minLng === 'number' && !isNaN(minLng) &&
+                    typeof minLat === 'number' && !isNaN(minLat) &&
+                    typeof maxLng === 'number' && !isNaN(maxLng) &&
+                    typeof maxLat === 'number' && !isNaN(maxLat) &&
+                    Math.abs(minLat) <= 90 && Math.abs(maxLat) <= 90
+                  ) {
+                    try {
+                      mapRef.current.fitBounds(
+                        [
+                          [minLng, minLat],
+                          [maxLng, maxLat],
+                        ],
+                        { padding: 80, duration: 1800 }
+                      );
+                    } catch (fitErr) {
+                      console.warn('Could not fitBounds to fetched scene overlay:', fitErr);
+                    }
+                  }
+                }
+              }}
+            />
+
+            <AOIChatbotHandoff
+              scene={fetchedScene}
+              onDismiss={() => setFetchedScene(null)}
+            />
+          </>
+        )}
       </div>
-    </Panel>
+    </div>
   );
 };
 

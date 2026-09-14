@@ -3,7 +3,7 @@
   "private": true,
   "version": "0.1.0",
   "type": "module",
-  "description": "SatQuery AI — agentic vision-language assistant for satellite & SAR remote sensing (SIH 2026, PS 26167, ISRO). Design-phase frontend shell with mocked backend data.",
+  "description": "SatQuery AI - chat-first workspace for agentic satellite & SAR analysis (SIH 2026, PS 26167, ISRO). Talks to the FastAPI backend over /api/v1.",
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
@@ -26,6 +26,7 @@
   },
   "devDependencies": {
     "@tailwindcss/vite": "^4.3.3",
+    "@types/node": "^26.5.0",
     "@types/react": "^19.2.18",
     "@types/react-dom": "^19.2.7",
     "@vitejs/plugin-react": "^6.1.1",

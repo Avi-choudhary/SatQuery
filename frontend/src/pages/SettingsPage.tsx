@@ -1,125 +1,161 @@
-import { useState } from 'react';
-import { Panel } from '../components/ui/Panel';
+import React from 'react';
+import { CheckCircle2, Cpu, Network, RefreshCcw, Server, XCircle } from 'lucide-react';
+import { Badge } from '../components/ui/Badge';
 import { Button } from '../components/ui/Button';
-import { API_BASE_URL, fetchSystemStatus, type SystemStatusResponse } from '../lib/api';
-import { CheckCircle2, XCircle, Loader2, Cpu, Globe } from 'lucide-react';
+import { InlineAlert } from '../components/ui/Feedback';
+import { useApp } from '../context/AppState';
+import { API_BASE_URL, describeCompute } from '../lib/api';
 
-const SettingsPage = () => {
-  const [testing, setTesting] = useState(false);
-  const [status, setStatus] = useState<SystemStatusResponse | null>(null);
-  const [error, setError] = useState<string | null>(null);
+const Field: React.FC<{ label: string; value: React.ReactNode; mono?: boolean }> = ({
+  label,
+  value,
+  mono = true,
+}) => (
+  <div className="min-w-0">
+    <dt className="label-caps text-ink-faint">{label}</dt>
+    <dd className={`mt-1 break-words text-[12.5px] text-ink ${mono ? 'font-mono' : ''}`}>{value}</dd>
+  </div>
+);
 
-  const handleTestConnection = async () => {
-    setTesting(true);
-    setError(null);
-    try {
-      const data = await fetchSystemStatus();
-      setStatus(data);
-    } catch (err: any) {
-      setError(err?.message || 'Failed to connect to backend.');
-      setStatus(null);
-    } finally {
-      setTesting(false);
-    }
-  };
+const SettingsPage: React.FC = () => {
+  const { backendPhase, backendStatus, backendError, refreshBackend } = useApp();
 
   return (
-    <div className="p-8 max-w-4xl mx-auto">
-      <h1 className="text-3xl font-bold text-white mb-8">System Settings</h1>
+    <div className="scrollbar-slim min-h-0 flex-1 overflow-y-auto">
+      <div className="mx-auto w-full max-w-3xl space-y-5 px-6 py-8">
+        <header>
+          <h1 className="text-xl font-semibold tracking-tight text-ink">Settings</h1>
+          <p className="mt-1 text-[13px] text-ink-muted">
+            Connection and compute details for the FastAPI backend serving this session.
+          </p>
+        </header>
 
-      <div className="grid gap-6">
-        <Panel variant="glass" className="p-6">
-          <h2 className="text-lg font-semibold text-white mb-4">General Configuration</h2>
-          <div className="space-y-4">
-            <div className="flex items-center justify-between">
-              <span className="text-sm text-slate-400">Dark Mode</span>
-              <div className="w-10 h-5 bg-accent-cyan rounded-full relative">
-                <div className="absolute right-1 top-1 w-3 h-3 bg-space-black rounded-full" />
-              </div>
+        {/* Connection */}
+        <section className="rounded-panel border border-line bg-surface p-5">
+          <div className="mb-4 flex items-center justify-between gap-3">
+            <div className="flex items-center gap-2">
+              <Server size={15} className="text-accent" aria-hidden />
+              <h2 className="text-sm font-medium text-ink">Backend connection</h2>
             </div>
-            <div className="flex items-center justify-between">
-              <span className="text-sm text-slate-400">Auto-save Trace Logs</span>
-              <div className="w-10 h-5 bg-accent-cyan rounded-full relative">
-                <div className="absolute right-1 top-1 w-3 h-3 bg-space-black rounded-full" />
-              </div>
-            </div>
-          </div>
-        </Panel>
-
-        <Panel variant="glass" className="p-6">
-          <h2 className="text-lg font-semibold text-white mb-4">AI Backend & Remote GPU Engine</h2>
-          <div className="space-y-4">
-            <div className="space-y-2">
-              <label className="text-xs font-mono text-slate-500 uppercase">Backend Endpoint</label>
-              <input
-                type="text"
-                readOnly
-                value={API_BASE_URL}
-                className="w-full bg-space-black border border-white/10 rounded p-2 text-sm font-mono text-accent-cyan"
-              />
-            </div>
-
             <Button
               variant="outline"
-              onClick={handleTestConnection}
-              disabled={testing}
-              className="text-xs uppercase tracking-widest flex items-center gap-2 cursor-pointer"
+              size="sm"
+              onClick={refreshBackend}
+              isLoading={backendPhase === 'checking'}
             >
-              {testing ? <Loader2 size={14} className="animate-spin" /> : null}
-              {testing ? 'Pinging Host...' : 'Test Connection & GPU'}
+              {backendPhase !== 'checking' && <RefreshCcw size={13} />}
+              Re-check
             </Button>
-
-            {error && (
-              <div className="p-3 bg-red-500/10 border border-red-500/30 rounded flex items-start gap-2 text-xs text-red-300">
-                <XCircle size={16} className="text-red-400 mt-0.5 shrink-0" />
-                <div>
-                  <p className="font-semibold">Backend Unreachable</p>
-                  <p>{error}</p>
-                </div>
-              </div>
-            )}
-
-            {status && (
-              <div className="p-4 bg-space-black/60 border border-white/10 rounded-lg space-y-3 font-mono text-xs">
-                <div className="flex items-center gap-2 text-green-400">
-                  <CheckCircle2 size={16} />
-                  <span className="font-semibold">Backend Online ({status.service})</span>
-                </div>
-
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-2 text-slate-300 pt-2 border-t border-white/10">
-                  <div>
-                    <span className="text-slate-500">Execution Mode: </span>
-                    <span className="text-accent-cyan font-bold">{status.execution_mode}</span>
-                  </div>
-                  {status.model_engine.remote_service_url && (
-                    <div>
-                      <span className="text-slate-500 flex items-center gap-1">
-                        <Globe size={12} /> Remote GPU Host:
-                      </span>
-                      <span className="text-yellow-400 break-all">{status.model_engine.remote_service_url}</span>
-                    </div>
-                  )}
-                  {status.model_engine.remote_host_status && (
-                    <div>
-                      <span className="text-slate-500">Host Status: </span>
-                      <span>{status.model_engine.remote_host_status}</span>
-                    </div>
-                  )}
-                  <div>
-                    <span className="text-slate-500 flex items-center gap-1">
-                      <Cpu size={12} /> Hardware:
-                    </span>
-                    <span>
-                      {status.model_engine.remote_vram
-                        ? status.model_engine.remote_vram
-                        : `${status.model_engine.local_device} (${status.model_engine.local_vram_gb} GB VRAM)`}
-                    </span>
-                  </div>
-                </div>
-              </div>
-            )}
           </div>
-        </Panel>
+
+          <dl className="grid gap-4 sm:grid-cols-2">
+            <Field label="API base" value={API_BASE_URL} />
+            <Field
+              label="Status"
+              value={
+                backendPhase === 'online' ? (
+                  <span className="inline-flex items-center gap-1.5 text-ok">
+                    <CheckCircle2 size={13} aria-hidden />
+                    online
+                  </span>
+                ) : backendPhase === 'checking' ? (
+                  <span className="text-amber">checking…</span>
+                ) : (
+                  <span className="inline-flex items-center gap-1.5 text-danger">
+                    <XCircle size={13} aria-hidden />
+                    unreachable
+                  </span>
+                )
+              }
+            />
+          </dl>
+
+          {backendPhase === 'offline' && (
+            <InlineAlert tone="error" title="Cannot reach the backend" className="mt-4">
+              {backendError ??
+                'No response from the API. Start the FastAPI server, then re-check.'}
+              <pre className="mt-2 overflow-x-auto rounded-md border border-line bg-ground px-2.5 py-2 font-mono text-[11px] text-ink-muted">
+                cd backend/SatQuery-master/backend{'\n'}python main.py
+              </pre>
+            </InlineAlert>
+          )}
+        </section>
+
+        {/* Compute */}
+        {backendStatus && (
+          <section className="rounded-panel border border-line bg-surface p-5">
+            <div className="mb-4 flex items-center gap-2">
+              <Cpu size={15} className="text-accent" aria-hidden />
+              <h2 className="text-sm font-medium text-ink">Inference engine</h2>
+              <Badge variant="info" className="ml-auto">
+                {backendStatus.execution_mode?.replace(/_/g, ' ')}
+              </Badge>
+            </div>
+
+            <dl className="grid gap-4 sm:grid-cols-2">
+              <Field label="Model" value={backendStatus.model_engine.model_name ?? 'Qwen3-VL-2B-SatQuery'} />
+              <Field
+                label="Trained Modalities"
+                value={
+                  backendStatus.model_engine.modalities_supported?.join(' · ') ??
+                  'Sentinel-1 (SAR) · Sentinel-2 (Optical)'
+                }
+              />
+              <Field label="Compute" value={describeCompute(backendStatus)} />
+              <Field
+                label="CUDA available"
+                value={backendStatus.model_engine.local_cuda_available ? 'yes' : 'no'}
+              />
+              {backendStatus.model_engine.remote_service_url && (
+                <>
+                  <Field
+                    label="Remote host"
+                    value={backendStatus.model_engine.remote_service_url}
+                  />
+                  <Field
+                    label="Remote health"
+                    value={backendStatus.model_engine.remote_host_status ?? '—'}
+                  />
+                </>
+              )}
+            </dl>
+          </section>
+        )}
+
+        {/* Specialists + network */}
+        {backendStatus && (
+          <section className="rounded-panel border border-line bg-surface p-5">
+            <div className="mb-4 flex items-center gap-2">
+              <Network size={15} className="text-accent" aria-hidden />
+              <h2 className="text-sm font-medium text-ink">Specialists &amp; network</h2>
+            </div>
+
+            <ul className="mb-4 space-y-1.5">
+              {Object.entries(backendStatus.specialists ?? {}).map(([key, value]) => (
+                <li
+                  key={key}
+                  className="flex items-center justify-between gap-3 rounded-lg border border-line bg-surface-2 px-3 py-2"
+                >
+                  <span className="font-mono text-[11.5px] text-ink-muted">
+                    {key.replace(/_/g, ' ')}
+                  </span>
+                  <span className="truncate text-right font-mono text-[11px] text-ink">{value}</span>
+                </li>
+              ))}
+            </ul>
+
+            <dl className="grid gap-4 sm:grid-cols-3">
+              <Field label="LAN IP" value={backendStatus.network?.lan_ip ?? '—'} />
+              <Field label="Port" value={backendStatus.network?.port ?? '—'} />
+              <Field label="Service" value={backendStatus.service} />
+            </dl>
+
+            <p className="mt-4 border-t border-line pt-3 font-mono text-[10.5px] leading-relaxed text-ink-faint">
+              Requests go to a same-origin path by default so Vite&rsquo;s proxy can
+              forward them; set VITE_API_BASE_URL to target another host.
+            </p>
+          </section>
+        )}
       </div>
     </div>
   );

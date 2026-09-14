@@ -14,7 +14,7 @@ const technologies = [
 
 export const TechStack = () => {
   return (
-    <section className="py-16 bg-space-navy/80 border-t border-white/5">
+    <section id="stack" className="py-16 bg-space-navy/80 border-t border-white/5">
       <div className="container mx-auto px-6">
         <div className="flex flex-col lg:flex-row items-start lg:items-center justify-between gap-8 mb-10">
           <div>

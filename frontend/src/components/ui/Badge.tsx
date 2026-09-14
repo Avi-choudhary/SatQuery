@@ -1,28 +1,40 @@
 import * as React from 'react';
 import { cn } from '../../lib/utils';
 
+type BadgeVariant = 'default' | 'success' | 'warning' | 'error' | 'info' | 'violet' | 'quiet';
+
 interface BadgeProps extends React.HTMLAttributes<HTMLSpanElement> {
-  variant?: 'default' | 'success' | 'warning' | 'error' | 'info';
+  variant?: BadgeVariant;
+  /** Renders a small leading status dot in the badge colour. */
+  dot?: boolean;
 }
 
-export const Badge = React.forwardRef<HTMLSpanElement, BadgeProps>(
-  ({ className, variant = 'default', ...props }, ref) => {
-    const variants = {
-      default: 'bg-white/10 text-white border border-white/20',
-      success: 'bg-accent-teal/20 text-accent-teal border border-accent-teal/30',
-      warning: 'bg-accent-warm/20 text-accent-warm border border-accent-warm/30',
-      error: 'bg-red-500/20 text-red-500 border border-red-500/30',
-      info: 'bg-accent-cyan/20 text-accent-cyan border border-accent-cyan/30',
-    };
+const VARIANTS: Record<BadgeVariant, string> = {
+  default: 'bg-surface-3 text-ink-muted border-line-strong',
+  quiet: 'bg-transparent text-ink-faint border-line',
+  success: 'bg-ok/10 text-ok border-ok/25',
+  warning: 'bg-amber/10 text-amber border-amber/25',
+  error: 'bg-danger/10 text-danger border-danger/25',
+  info: 'bg-accent/10 text-accent border-accent/25',
+  violet: 'bg-violet/10 text-violet border-violet/25',
+};
 
-    return (
-      <span
-        ref={ref}
-        className={cn('inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium', variants[variant], className)}
-        {...props}
-      />
-    );
-  }
+export const Badge = React.forwardRef<HTMLSpanElement, BadgeProps>(
+  ({ className, variant = 'default', dot, children, ...props }, ref) => (
+    <span
+      ref={ref}
+      className={cn(
+        'inline-flex items-center gap-1.5 rounded-md border px-2 py-[3px]',
+        'font-mono text-[10px] leading-none tracking-wide whitespace-nowrap',
+        VARIANTS[variant],
+        className
+      )}
+      {...props}
+    >
+      {dot && <span className="h-1.5 w-1.5 rounded-full bg-current" aria-hidden />}
+      {children}
+    </span>
+  )
 );
 
 Badge.displayName = 'Badge';

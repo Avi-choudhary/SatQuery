@@ -1,4 +1,7 @@
 import os
+import sys
+import re
+from pathlib import Path
 from typing import List
 from core.tracer import Tracer
 from schemas.responses import SatQueryResponse
@@ -11,14 +14,20 @@ async def process_query(query: str, file_paths: List[str]) -> SatQueryResponse:
     Central Agentic Controller execution flow:
     Stage 1: Input reception & file validation.
     Stage 2: GIS Pre-processing (co-registration / CRS alignment).
-    Stage 3: Natural language intent parsing.
-    Stage 4: Specialist AI tool dispatch (VQA, Grounding, or Change Detection).
+    Stage 3: Natural language intent parsing with language directive retention.
+    Stage 4: Specialist AI tool dispatch (VQA, Grounding, Change Detection, or Metadata).
     Stage 5: Aggregation and auditable trace compilation.
     """
     tracer = Tracer()
     file_count = len(file_paths)
     file_names = ", ".join(os.path.basename(f) for f in file_paths) if file_paths else "none"
-    tracer.append_log(f"step 0: received query '{query}' with {file_count} input file(s) [{file_names}]")
+    
+    # Detect language directive prepended by frontend toggle
+    is_hindi = "[Instruction: Respond strictly in Hindi" in query or bool(re.search(r"[\u0900-\u097F]", query))
+    
+    # Clean query display string for logging
+    clean_display_query = re.sub(r"\[Instruction:[\s\S]*?\]\n?", "", query).strip()
+    tracer.append_log(f"step 0: received query '{clean_display_query}' with {file_count} input file(s) [{file_names}]")
 
     # Stage 2: GIS Pre-processing Engine
     processed_paths = file_paths
@@ -31,20 +40,22 @@ async def process_query(query: str, file_paths: List[str]) -> SatQueryResponse:
         tracer.append_log(f"step 1: validated single satellite scene [sensor: {info.get('sensor')}, CRS: {info.get('crs')}]")
 
     # Stage 3: Intent Classification
-    query_lower = query.lower()
+    query_lower = clean_display_query.lower()
     task = "VQA"
 
     change_keywords = [
         "change", "changes", "changed", "new building", "increase", "growth",
         "differ", "difference", "differences", "loss", "between dates", "temporal",
-        "expansion", "deforestation", "flood", "before and after", "compare", "comparison"
+        "expansion", "deforestation", "flood", "before and after", "compare", "comparison",
+        "बदलाव", "परिवर्तन", "अंतर", "तुलना"
     ]
     coord_keywords = [
         "longitude", "latitude", "lattitude", "lat and lon", "lat/lon", "coordinates of",
         "coordinate of", "where is this image", "where is this scene", "geographic location",
-        "bounding box of this", "spatial extent", "what are the coordinates", "gps coordinates", "crs"
+        "bounding box of this", "spatial extent", "what are the coordinates", "gps coordinates", "crs",
+        "निर्देशांक", "अक्षांश", "देशांतर", "स्थान"
     ]
-    grounding_keywords = ["where", "find", "locate", "outline", "box", "detect", "pinpoint"]
+    grounding_keywords = ["where", "find", "locate", "outline", "box", "detect", "pinpoint", "ढूंढो", "खोजो", "चिह्नित"]
 
     if file_count >= 2 or any(k in query_lower for k in change_keywords):
         task = "CHANGE_DETECTION"
@@ -75,16 +86,28 @@ async def process_query(query: str, file_paths: List[str]) -> SatQueryResponse:
             res_val = info.get("resolution")
             res_str = f"{res_val[0]}m" if res_val and isinstance(res_val, list) else "10.0m"
 
-            text_answer = (
-                f"Geographic Coordinates & Spatial Extent:\n\n"
-                f"• Center Coordinates: {c_lat:.4f}° N, {c_lon:.4f}° E\n"
-                f"• Longitude Range: {min_lon:.4f}° E to {max_lon:.4f}° E\n"
-                f"• Latitude Range: {min_lat:.4f}° N to {max_lat:.4f}° N\n"
-                f"• Spatial Reference (CRS): {crs_str}\n"
-                f"• Resolution (GSD): {res_str} per pixel\n"
-                f"• Sensor: {sensor_str}\n\n"
-                f"The spatial boundary polygon for this scene has been projected onto the MapLibre viewport."
-            )
+            if is_hindi:
+                text_answer = (
+                    f"भौगोलिक निर्देशांक और स्थान सीमा (Spatial Extent):\n\n"
+                    f"• केंद्र निर्देशांक (Center): {c_lat:.4f}° N, {c_lon:.4f}° E\n"
+                    f"• देशांतर सीमा (Longitude): {min_lon:.4f}° E से {max_lon:.4f}° E\n"
+                    f"• अक्षांश सीमा (Latitude): {min_lat:.4f}° N से {max_lat:.4f}° N\n"
+                    f"• स्थानिक संदर्भ (CRS): {crs_str}\n"
+                    f"• रेजोल्यूशन (GSD): {res_str} प्रति पिक्सेल\n"
+                    f"• सेंसर प्रकार: {sensor_str}\n\n"
+                    f"इस उपग्रह दृश्य की सीमा रेखा मानचित्र (MapLibre viewport) पर प्रक्षेपित कर दी गई है।"
+                )
+            else:
+                text_answer = (
+                    f"Geographic Coordinates & Spatial Extent:\n\n"
+                    f"• Center Coordinates: {c_lat:.4f}° N, {c_lon:.4f}° E\n"
+                    f"• Longitude Range: {min_lon:.4f}° E to {max_lon:.4f}° E\n"
+                    f"• Latitude Range: {min_lat:.4f}° N to {max_lat:.4f}° N\n"
+                    f"• Spatial Reference (CRS): {crs_str}\n"
+                    f"• Resolution (GSD): {res_str} per pixel\n"
+                    f"• Sensor: {sensor_str}\n\n"
+                    f"The spatial boundary polygon for this scene has been projected onto the MapLibre viewport."
+                )
 
             geojson_poly = {
                 "type": "Feature",
@@ -110,11 +133,18 @@ async def process_query(query: str, file_paths: List[str]) -> SatQueryResponse:
             )
         else:
             fname = os.path.basename(target_file) if target_file else "uploaded file"
-            text_answer = (
-                f"Notice: The file '{fname}' is a standard pixel image without embedded geospatial header tags (geotransform / CRS).\n\n"
-                f"To inspect precise latitude and longitude, please upload a georeferenced GeoTIFF (.tif) or include companion metadata."
-            )
+            if is_hindi:
+                text_answer = (
+                    f"सूचना: फ़ाइल '{fname}' एक सामान्य पिक्सेल छवि है जिसमें भौगोलिक हेडर टैग (geotransform / CRS) शामिल नहीं हैं।\n\n"
+                    f"सटीक अक्षांश और देशांतर देखने के लिए, कृपया एक जियोरेफ़रेंस्ड GeoTIFF (.tif) फ़ाइल अपलोड करें।"
+                )
+            else:
+                text_answer = (
+                    f"Notice: The file '{fname}' is a standard pixel image without embedded geospatial header tags (geotransform / CRS).\n\n"
+                    f"To inspect precise latitude and longitude, please upload a georeferenced GeoTIFF (.tif) or include companion metadata."
+                )
             tracer.append_log("step 3: file lacks embedded geospatial header tags")
+
     elif task == "CHANGE_DETECTION":
         text_answer, visual_evidence = await change_service.run_inference(query, processed_paths, tracer)
     elif task == "GROUNDING":
@@ -122,7 +152,7 @@ async def process_query(query: str, file_paths: List[str]) -> SatQueryResponse:
     elif task == "VQA":
         text_answer, visual_evidence = await vqa_service.run_inference(query, processed_paths, tracer)
     else:
-        text_answer = "Could not determine the appropriate task for the query."
+        text_answer = "त्रुटि: कार्य प्रकार का निर्धारण नहीं किया जा सका।" if is_hindi else "Could not determine the appropriate task for the query."
 
     # Stage 5: Trace & Response Packaging
     trace_dict = tracer.get_trace()
@@ -132,4 +162,3 @@ async def process_query(query: str, file_paths: List[str]) -> SatQueryResponse:
         execution_trace=trace_dict,
         trace_log=trace_dict.get("steps", [])
     )
-

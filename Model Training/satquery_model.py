@@ -68,8 +68,8 @@ class SatQueryVLM:
 
         # Resolve paths relative to module directory if not found in current working dir
         if not lora_dir:
-            default_lora = MODULE_DIR / "output" / "qwen3_vl_satquery_lora"
-            lora_dir = str(default_lora) if default_lora.exists() else "output/qwen3_vl_satquery_lora"
+            default_lora = MODULE_DIR / "output" / "qwen3_vl_satquery_multimodal_lora"
+            lora_dir = str(default_lora) if default_lora.exists() else "output/qwen3_vl_satquery_multimodal_lora"
         if not merged_dir:
             default_merged = MODULE_DIR / "output" / "qwen3_vl_satquery_merged"
             merged_dir = str(default_merged) if default_merged.exists() else "output/qwen3_vl_satquery_merged"
@@ -107,10 +107,42 @@ class SatQueryVLM:
 
         self.model.eval()
 
+        self._scene_landcover_cache: Dict[str, str] = {}
+
         if warmup and "cuda" in self.device:
             self._warmup()
 
         print("[SatQuery VLM] Model ready for inference.")
+
+    def _detect_primary_landcover(self, pil_img: Image.Image, geotiff_path: Optional[str] = None) -> str:
+        """Determines or retrieves cached primary land cover for the scene."""
+        cache_key = str(geotiff_path) if geotiff_path else f"{pil_img.size}"
+        if cache_key in self._scene_landcover_cache:
+            return self._scene_landcover_cache[cache_key]
+
+        try:
+            prompt = "Analyze this Sentinel-2 optical satellite image.\n\nQuestion: What is the primary land cover?"
+            chat_prompt = self.processor.apply_chat_template(
+                [{"role": "user", "content": [{"type": "image", "image": pil_img}, {"type": "text", "text": prompt}]}],
+                tokenize=False,
+                add_generation_prompt=True
+            )
+            inputs = self.processor(text=[chat_prompt], images=[pil_img], return_tensors="pt")
+            inputs = {k: v.to(self.device) for k, v in inputs.items()}
+            with torch.no_grad():
+                if "cuda" in self.device:
+                    with torch.amp.autocast(device_type="cuda", dtype=torch.bfloat16):
+                        out = self.model.generate(**inputs, max_new_tokens=8, do_sample=False)
+                else:
+                    out = self.model.generate(**inputs, max_new_tokens=8, do_sample=False)
+            gen = self.processor.decode(out[0][inputs["input_ids"].shape[1]:], skip_special_tokens=True).strip().lower()
+            if gen and gen not in ["no", "yes", "none", "unknown", ""]:
+                self._scene_landcover_cache[cache_key] = gen
+                return gen
+        except Exception as e:
+            print(f"[SatQuery VLM] Land cover check note: {e}")
+
+        return "urban fabric"
 
     def _warmup(self):
         """Runs a tiny 1-step warmup pass so the first user query is instant."""
@@ -541,23 +573,30 @@ class SatQueryVLM:
                     is_tag_list = True
 
             # If the model already gave a natural conversational answer (> 10 words, not coords, not tag list, and with punctuation), PRESERVE IT!
-            if not is_pure_coords and not is_tag_list and len(clean_raw.split()) >= 10 and ("." in clean_raw or "?" in clean_raw):
+            if not is_pure_coords and not is_tag_list and len(clean_raw.split()) >= 10 and ("." in clean_raw or "।" in clean_raw or "?" in clean_raw) and "primarily composed of **no**" not in clean_raw:
                 if detections and "cyan" not in clean_raw.lower() and "map" not in clean_raw.lower():
                     final_answer = f"{clean_raw}\n\n*The identified target area has also been projected and outlined in neon cyan on your interactive map viewport.*"
                 else:
                     final_answer = clean_raw
             else:
-                from response_synthesizer import synthesize_conversational_response
-                # Extract clean user query if wrapped
-                user_q = prompt
-                if "User Question:" in prompt:
-                    user_q = prompt.split("User Question:")[1].split("\n")[0].strip()
-                elif "Question:" in prompt:
-                    user_q = prompt.split("Question:")[1].split("\n")[0].strip()
+                from response_synthesizer import synthesize_conversational_response, extract_clean_user_query
+                user_q = extract_clean_user_query(prompt) or prompt
+
+                # Determine or retrieve scene land cover
+                cache_key = str(geotiff_path) if geotiff_path else f"{pil_img.size}"
+                raw_clean = clean_raw.strip().lower().rstrip(".।")
+                is_binary = raw_clean in ["no", "yes", "false", "true", "नहीं", "हाँ"]
+
+                if not is_binary and not is_pure_coords and clean_raw and len(clean_raw.split()) <= 6:
+                    self._scene_landcover_cache[cache_key] = clean_raw
+                    scene_lc = clean_raw
+                else:
+                    scene_lc = self._detect_primary_landcover(pil_img, geotiff_path)
 
                 final_answer = synthesize_conversational_response(
                     query=user_q,
                     raw_answer=raw_answer,
+                    scene_landcover=scene_lc,
                     detections=detections,
                     wgs84_bounds=detections[0]["wgs84"] if detections else None
                 )
@@ -567,6 +606,7 @@ class SatQueryVLM:
         return {
             "answer": final_answer,
             "raw_answer": raw_answer,
+            "scene_landcover": scene_lc if 'scene_lc' in locals() else None,
             "has_bbox": len(detections) > 0,
             "detections": detections,
             "bbox_normalized": detections[0]["normalized"] if detections else None,

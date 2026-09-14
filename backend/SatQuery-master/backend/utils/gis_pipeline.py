@@ -8,6 +8,8 @@ radiometric normalization, and coordinate metadata extraction.
 import os
 import sys
 from pathlib import Path
+
+import numpy as np
 from typing import List, Tuple, Dict, Any, Optional
 
 # Locate workspace root and gis_extraction_logic
@@ -83,6 +85,168 @@ def generate_raster_preview(file_path: str, output_dir: Optional[str] = None) ->
         return None
 
 
+# =============================================================================
+# Web-map overlay
+# =============================================================================
+
+WEB_MERCATOR = "EPSG:3857"
+
+
+def _stretch_to_byte(band: np.ndarray, valid: np.ndarray) -> np.ndarray:
+    """2%-98% percentile contrast stretch over valid pixels only."""
+    out = np.zeros(band.shape, dtype=np.uint8)
+    values = band[valid & np.isfinite(band)]
+    if values.size < 16:
+        return out
+
+    low, high = np.percentile(values, (2, 98))
+    if not np.isfinite(low) or not np.isfinite(high) or high <= low:
+        low, high = float(np.nanmin(values)), float(np.nanmax(values))
+    if high <= low:
+        return out
+
+    scaled = (np.clip(band, low, high) - low) / (high - low) * 255.0
+    out[:] = np.nan_to_num(scaled, nan=0.0).astype(np.uint8)
+    return out
+
+
+def build_web_overlay(
+    file_path: str,
+    output_dir: Optional[str] = None,
+    max_dim: int = 2048,
+    suffix: str = "web",
+) -> Optional[Dict[str, Any]]:
+    """
+    Render a georeferenced raster as an RGBA PNG that lines up exactly with a
+    slippy map, and return the corner coordinates to place it at.
+
+    Why reproject rather than just render the raster and stretch it across its
+    WGS84 bounding box (which is what this backend used to do):
+
+    * A UTM scene is not a Mercator scene. Stretching a UTM-gridded image
+      across lat/lon corners shears it; the error grows with latitude and with
+      distance from the UTM central meridian, and reaches hundreds of metres on
+      a city-sized scene.
+    * `transform_bounds` returns the *envelope* of the reprojected footprint.
+      For any non-4326 source that envelope is strictly larger than the image,
+      so the image gets stretched to fill a box it does not occupy.
+    * MapLibre interpolates an image source linearly in Mercator space, so even
+      an EPSG:4326 raster placed by its lat/lon corners is compressed towards
+      the poles.
+
+    Warping to EPSG:3857 first removes all three: the PNG's pixel grid becomes
+    the map's pixel grid, so it registers at every zoom, at any latitude, from
+    any source CRS.
+
+    Returns None when the raster carries no CRS — a file with no georeference
+    cannot be honestly placed on a map.
+    """
+    if not file_path or not os.path.exists(file_path):
+        return None
+
+    try:
+        import rasterio
+        from rasterio.warp import (
+            Resampling,
+            calculate_default_transform,
+            reproject,
+            transform_bounds,
+        )
+        from PIL import Image
+
+        with rasterio.open(file_path) as src:
+            if src.crs is None:
+                return None
+
+            # Target grid in Web Mercator, capped so the PNG stays servable.
+            transform, width, height = calculate_default_transform(
+                src.crs, WEB_MERCATOR, src.width, src.height, *src.bounds
+            )
+            longest = max(width, height)
+            if longest > max_dim:
+                scale = max_dim / float(longest)
+                transform, width, height = calculate_default_transform(
+                    src.crs,
+                    WEB_MERCATOR,
+                    src.width,
+                    src.height,
+                    *src.bounds,
+                    dst_width=max(1, int(width * scale)),
+                    dst_height=max(1, int(height * scale)),
+                )
+
+            # Band order follows this project's convention for its Sentinel-2
+            # products: band 1 = red (B4), 2 = green (B3), 3 = blue (B2).
+            band_indexes = [1, 2, 3] if src.count >= 3 else [1, 1, 1]
+
+            channels = []
+            for index in band_indexes:
+                destination = np.zeros((height, width), dtype=np.float32)
+                reproject(
+                    source=rasterio.band(src, index),
+                    destination=destination,
+                    src_transform=src.transform,
+                    src_crs=src.crs,
+                    dst_transform=transform,
+                    dst_crs=WEB_MERCATOR,
+                    resampling=Resampling.bilinear,
+                    src_nodata=src.nodata,
+                    dst_nodata=np.nan,
+                )
+                channels.append(destination)
+
+            # Warp the source validity mask on the same grid so the nodata
+            # skirt a rotated warp always leaves becomes transparent instead of
+            # painting a black box over the basemap.
+            mask_dst = np.zeros((height, width), dtype=np.uint8)
+            reproject(
+                source=src.dataset_mask(),
+                destination=mask_dst,
+                src_transform=src.transform,
+                src_crs=src.crs,
+                dst_transform=transform,
+                dst_crs=WEB_MERCATOR,
+                resampling=Resampling.nearest,
+            )
+            valid = (mask_dst > 0) & np.isfinite(channels[0])
+
+            rgba = np.zeros((height, width, 4), dtype=np.uint8)
+            for i, channel in enumerate(channels):
+                rgba[:, :, i] = _stretch_to_byte(channel, valid)
+            rgba[:, :, 3] = np.where(valid, 255, 0).astype(np.uint8)
+
+            target_dir = Path(output_dir) if output_dir else Path(file_path).parent
+            target_dir.mkdir(parents=True, exist_ok=True)
+            png_path = target_dir / f"{suffix}_{Path(file_path).stem}.png"
+            Image.fromarray(rgba, mode="RGBA").save(str(png_path), "PNG")
+
+            # Corners of the warped extent. Because the image is axis-aligned in
+            # 3857 and 3857 -> 4326 is separable, the lat/lon envelope of that
+            # extent *is* the image's footprint, so MapLibre places it exactly.
+            left, top = transform * (0, 0)
+            right, bottom = transform * (width, height)
+            wgs84 = transform_bounds(WEB_MERCATOR, "EPSG:4326", left, bottom, right, top)
+
+            return {
+                "png_path": str(png_path),
+                "png_name": png_path.name,
+                "wgs84_bounds": [round(float(v), 8) for v in wgs84],
+                "mercator_bounds": [
+                    float(left),
+                    float(bottom),
+                    float(right),
+                    float(top),
+                ],
+                "width": int(width),
+                "height": int(height),
+                "source_crs": str(src.crs),
+            }
+
+    except Exception as exc:
+        print(f"[GIS Overlay Warning]: {file_path}: {type(exc).__name__}: {exc}")
+        return None
+
+
 def get_geotiff_info(file_path: str) -> Dict[str, Any]:
     """Extracts CRS, shape, bounds, center coordinates, and sensor information from a GeoTIFF or metadata."""
     info = {
@@ -103,7 +267,15 @@ def get_geotiff_info(file_path: str) -> Dict[str, Any]:
         return info
 
     fname_lower = os.path.basename(file_path).lower()
-    if "_s1" in fname_lower or "sentinel-1" in fname_lower or "radar" in fname_lower or "sar" in fname_lower:
+    
+    # ISRO Specific Sensor Detection
+    if "cartosat" in fname_lower:
+        info["sensor"] = "ISRO Cartosat-3 (High-Res Optical)"
+    elif "risat" in fname_lower or "eos-04" in fname_lower or "eos04" in fname_lower:
+        info["sensor"] = "ISRO RISAT-1A / EOS-04 (SAR)"
+    elif "resourcesat" in fname_lower or "liss" in fname_lower or "awifs" in fname_lower:
+        info["sensor"] = "ISRO Resourcesat-2 (Optical)"
+    elif "_s1" in fname_lower or "sentinel-1" in fname_lower or "radar" in fname_lower or "sar" in fname_lower:
         info["sensor"] = "Sentinel-1 (SAR)"
     elif "_s2" in fname_lower or "sentinel-2" in fname_lower or "optical" in fname_lower:
         info["sensor"] = "Sentinel-2 (Optical)"

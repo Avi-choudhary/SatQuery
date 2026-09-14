@@ -1,104 +1,98 @@
-import { useState, type FormEvent } from 'react';
-import { motion } from 'framer-motion';
-import { Button } from '../components/ui/Button';
-import { Panel } from '../components/ui/Panel';
-import { Mail, Lock, ArrowRight } from 'lucide-react';
+import React, { useState, type FormEvent } from 'react';
 import { useNavigate } from 'react-router-dom';
+import { ArrowRight, Globe2, Lock, Mail } from 'lucide-react';
+import { Button } from '../components/ui/Button';
 
 interface LoginProps {
   mode?: 'login' | 'signup';
 }
 
-const Login = ({ mode = 'login' }: LoginProps) => {
+const Login: React.FC<LoginProps> = ({ mode = 'login' }) => {
   const navigate = useNavigate();
-  const [email, setEmail] = useState('');
-  const [password, setPassword] = useState('');
-  const [isLoading, setIsLoading] = useState(false);
+  const [pending, setPending] = useState(false);
+  const isLogin = mode === 'login';
 
-  const handleSubmit = async (e: FormEvent) => {
-    e.preventDefault();
-    setIsLoading(true);
-    // Simulate auth
-    setTimeout(() => {
-      setIsLoading(false);
-      navigate('/console');
-    }, 1500);
+  const handleSubmit = (event: FormEvent) => {
+    event.preventDefault();
+    setPending(true);
+    // No auth backend exists yet — this only opens the workspace.
+    setTimeout(() => navigate('/console'), 400);
   };
 
   return (
-    <div className="min-h-screen w-full flex items-center justify-center bg-space-black p-6 relative overflow-hidden">
-      {/* Ambient background glow */}
-      <div className="absolute top-[-10%] left-[-10%] w-[40%] h-[40%] bg-accent-cyan/5 blur-[120px] rounded-full" />
-      <div className="absolute bottom-[-10%] right-[-10%] w-[40%] h-[40%] bg-accent-teal/5 blur-[120px] rounded-full" />
+    <div className="relative flex min-h-screen w-full items-center justify-center overflow-hidden bg-ground p-6">
+      <div className="radar-grid pointer-events-none absolute inset-0" aria-hidden />
+      <div
+        className="pointer-events-none absolute left-1/2 top-1/3 h-[36rem] w-[36rem] -translate-x-1/2 -translate-y-1/2 rounded-full bg-accent/5 blur-[140px]"
+        aria-hidden
+      />
 
-      <motion.div
-        initial={{ opacity: 0, y: 20 }}
-        animate={{ opacity: 1, y: 0 }}
-        transition={{ duration: 0.6 }}
-        className="w-full max-w-md"
-      >
-        <Panel variant="glass" className="p-8 border border-white/10 shadow-2xl">
-          <div className="text-center mb-8">
-            <h1 className="text-3xl font-bold text-white mb-2">
-              {mode === 'login' ? 'Welcome Back' : 'Create Account'}
-            </h1>
-            <p className="text-slate-400 text-sm">
-              {mode === 'login' ? 'Enter your credentials to access the console' : 'Join the next generation of satellite analysis'}
-            </p>
-          </div>
+      <div className="relative w-full max-w-sm">
+        <div className="mb-7 text-center">
+          <span className="mx-auto mb-4 flex h-11 w-11 items-center justify-center rounded-xl border border-accent/25 bg-accent/10 text-accent">
+            <Globe2 size={21} />
+          </span>
+          <h1 className="text-xl font-semibold tracking-tight text-ink">
+            {isLogin ? 'Sign in to SatQuery' : 'Create an account'}
+          </h1>
+          <p className="mt-1.5 text-[13px] text-ink-muted">
+            Agentic analysis for satellite and SAR imagery.
+          </p>
+        </div>
 
-          <form onSubmit={handleSubmit} className="space-y-5">
-            <div className="space-y-2">
-              <label className="text-xs font-mono uppercase tracking-wider text-slate-500 ml-1">Email Address</label>
-              <div className="relative">
-                <Mail className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-500" size={18} />
-                <input
-                  type="email"
-                  required
-                  value={email}
-                  onChange={(e) => setEmail(e.target.value)}
-                  className="w-full bg-space-black border border-white/10 rounded-lg py-3 pl-10 pr-4 text-sm text-white placeholder:text-white/20 focus:outline-none focus:ring-1 focus:ring-accent-cyan transition-all"
-                  placeholder="name@agency.gov"
-                />
-              </div>
-            </div>
+        <form
+          onSubmit={handleSubmit}
+          className="space-y-3.5 rounded-panel border border-line bg-surface p-5"
+        >
+          <label className="block">
+            <span className="label-caps text-ink-faint">Email</span>
+            <span className="relative mt-1.5 flex items-center">
+              <Mail size={15} className="absolute left-3 text-ink-faint" aria-hidden />
+              <input
+                type="email"
+                required
+                autoComplete="email"
+                placeholder="name@agency.gov"
+                className="h-10 w-full rounded-lg border border-line bg-surface-2 pl-9 pr-3 text-[13.5px] text-ink outline-none transition-colors placeholder:text-ink-faint focus:border-accent/50"
+              />
+            </span>
+          </label>
 
-            <div className="space-y-2">
-              <label className="text-xs font-mono uppercase tracking-wider text-slate-500 ml-1">Password</label>
-              <div className="relative">
-                <Lock className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-500" size={18} />
-                <input
-                  type="password"
-                  required
-                  value={password}
-                  onChange={(e) => setPassword(e.target.value)}
-                  className="w-full bg-space-black border border-white/10 rounded-lg py-3 pl-10 pr-4 text-sm text-white placeholder:text-white/20 focus:outline-none focus:ring-1 focus:ring-accent-cyan transition-all"
-                  placeholder="••••••••"
-                />
-              </div>
-            </div>
+          <label className="block">
+            <span className="label-caps text-ink-faint">Password</span>
+            <span className="relative mt-1.5 flex items-center">
+              <Lock size={15} className="absolute left-3 text-ink-faint" aria-hidden />
+              <input
+                type="password"
+                required
+                autoComplete={isLogin ? 'current-password' : 'new-password'}
+                placeholder="••••••••"
+                className="h-10 w-full rounded-lg border border-line bg-surface-2 pl-9 pr-3 text-[13.5px] text-ink outline-none transition-colors placeholder:text-ink-faint focus:border-accent/50"
+              />
+            </span>
+          </label>
 
-            <Button
-              type="submit"
-              className="w-full py-3 font-mono text-sm uppercase tracking-widest mt-4"
-              disabled={isLoading}
-            >
-              {isLoading ? 'Authenticating...' : mode === 'login' ? 'Login' : 'Sign Up'}
-              {!isLoading && <ArrowRight size={16} className="ml-2" />}
-            </Button>
-          </form>
+          <Button type="submit" className="w-full" isLoading={pending}>
+            {isLogin ? 'Sign in' : 'Create account'}
+            {!pending && <ArrowRight size={15} />}
+          </Button>
+        </form>
 
-          <div className="mt-8 text-center">
-            <button
-              type="button"
-              onClick={() => navigate(mode === 'login' ? '/signup' : '/login')}
-              className="text-xs text-slate-500 hover:text-accent-cyan transition-colors"
-            >
-              {mode === 'login' ? "Don't have an account? Sign Up" : "Already have an account? Login"}
-            </button>
-          </div>
-        </Panel>
-      </motion.div>
+        <p className="mt-4 text-center text-[12.5px] text-ink-faint">
+          {isLogin ? 'No account yet?' : 'Already registered?'}{' '}
+          <button
+            type="button"
+            onClick={() => navigate(isLogin ? '/signup' : '/login')}
+            className="cursor-pointer text-accent transition-colors hover:text-accent/80"
+          >
+            {isLogin ? 'Sign up' : 'Sign in'}
+          </button>
+        </p>
+
+        <p className="mt-6 text-center font-mono text-[10px] leading-relaxed text-ink-faint">
+          Demo only — these fields are not checked against any auth service.
+        </p>
+      </div>
     </div>
   );
 };
