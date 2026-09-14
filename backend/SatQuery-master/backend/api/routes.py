@@ -12,7 +12,7 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
-from auth.dependencies import get_current_user
+from auth.dependencies import get_current_user, get_optional_current_user
 from core.agent import process_query
 from db.session import get_db
 from models.analysis_run import AnalysisRun
@@ -109,7 +109,7 @@ async def handle_satquery(
     after_file: Optional[UploadFile] = File(None),
     dataset_name: Optional[str] = Form(None),
     conversation_id: Optional[str] = Form(None),
-    current_user: User = Depends(get_current_user),
+    current_user: Optional[User] = Depends(get_optional_current_user),
     db: Session = Depends(get_db),
 ):
     if not query.strip():
@@ -118,37 +118,44 @@ async def handle_satquery(
             detail="Query cannot be empty.",
         )
 
-    # 1. Resolve or create user-owned conversation
+    # 1. Resolve or create user-owned conversation if authenticated
     conv = None
-    if conversation_id and conversation_id.strip():
-        conv = (
-            db.query(Conversation)
-            .filter(Conversation.id == conversation_id.strip(), Conversation.user_id == current_user.id)
-            .first()
-        )
-        if not conv:
-            raise HTTPException(
-                status_code=404,
-                detail="Conversation not found or access denied.",
+    if current_user is not None:
+        if conversation_id and conversation_id.strip():
+            conv = (
+                db.query(Conversation)
+                .filter(Conversation.id == conversation_id.strip(), Conversation.user_id == current_user.id)
+                .first()
             )
-    else:
-        title_snippet = query.strip().split("\n")[0][:80]
-        conv = Conversation(
-            user_id=current_user.id,
-            title=title_snippet or "New Conversation",
-        )
-        db.add(conv)
-        db.commit()
-        db.refresh(conv)
+            if not conv:
+                raise HTTPException(
+                    status_code=404,
+                    detail="Conversation not found or access denied.",
+                )
+        else:
+            title_snippet = query.strip().split("\n")[0][:80]
+            conv = Conversation(
+                user_id=current_user.id,
+                title=title_snippet or "New Conversation",
+            )
+            db.add(conv)
+            db.commit()
+            db.refresh(conv)
 
-    # 2. Persist user message
-    user_msg = Message(
-        conversation_id=conv.id,
-        role="user",
-        content=query.strip(),
-    )
-    db.add(user_msg)
-    db.commit()
+        # 2. Persist user message
+        user_msg = Message(
+            conversation_id=conv.id,
+            role="user",
+            content=query.strip(),
+        )
+        db.add(user_msg)
+        db.commit()
+    elif conversation_id and conversation_id.strip():
+        # Unauthenticated request trying to access a conversation
+        raise HTTPException(
+            status_code=404,
+            detail="Conversation not found or access denied.",
+        )
 
     saved_paths: List[str] = []
 
@@ -195,39 +202,40 @@ async def handle_satquery(
             file_paths=saved_paths,
         )
 
-        # 3. Persist assistant message
-        asst_msg = Message(
-            conversation_id=conv.id,
-            role="assistant",
-            content=res.text_answer,
-            visual_evidence=res.visual_evidence,
-            execution_trace=res.execution_trace,
-        )
-        db.add(asst_msg)
+        # 3. Persist assistant message & run metadata if authenticated
+        if current_user is not None and conv is not None:
+            asst_msg = Message(
+                conversation_id=conv.id,
+                role="assistant",
+                content=res.text_answer,
+                visual_evidence=res.visual_evidence,
+                execution_trace=res.execution_trace,
+            )
+            db.add(asst_msg)
 
-        # 4. Persist analysis run metadata
-        b_file = Path(saved_paths[0]).name if len(saved_paths) > 0 else None
-        a_file = Path(saved_paths[1]).name if len(saved_paths) > 1 else None
-        analysis_ref = None
-        if isinstance(res.execution_trace, dict):
-            analysis_ref = res.execution_trace.get("output_dir") or res.execution_trace.get("analysis_reference")
+            b_file = Path(saved_paths[0]).name if len(saved_paths) > 0 else None
+            a_file = Path(saved_paths[1]).name if len(saved_paths) > 1 else None
+            analysis_ref = None
+            if isinstance(res.execution_trace, dict):
+                analysis_ref = res.execution_trace.get("output_dir") or res.execution_trace.get("analysis_reference")
 
-        analysis_run = AnalysisRun(
-            conversation_id=conv.id,
-            user_id=current_user.id,
-            query=query.strip(),
-            before_filename=b_file,
-            after_filename=a_file,
-            result_summary=res.text_answer[:400],
-            analysis_reference=str(analysis_ref) if analysis_ref else None,
-            artifacts={"visual_evidence_count": len(res.visual_evidence)},
-        )
-        db.add(analysis_run)
+            analysis_run = AnalysisRun(
+                conversation_id=conv.id,
+                user_id=current_user.id,
+                query=query.strip(),
+                before_filename=b_file,
+                after_filename=a_file,
+                result_summary=res.text_answer[:400],
+                analysis_reference=str(analysis_ref) if analysis_ref else None,
+                artifacts={"visual_evidence_count": len(res.visual_evidence)},
+            )
+            db.add(analysis_run)
 
-        conv.updated_at = datetime.now(timezone.utc)
-        db.commit()
+            conv.updated_at = datetime.now(timezone.utc)
+            db.commit()
 
-        res.conversation_id = conv.id
+            res.conversation_id = conv.id
+
         return res
 
     except HTTPException:
@@ -242,7 +250,7 @@ async def handle_satquery(
 @router.post("/satquery/json", response_model=SatQueryResponse)
 async def handle_satquery_json(
     req: JsonQueryRequest,
-    current_user: User = Depends(get_current_user),
+    current_user: Optional[User] = Depends(get_optional_current_user),
     db: Session = Depends(get_db),
 ):
     if not req.query.strip():
@@ -251,37 +259,43 @@ async def handle_satquery_json(
             detail="Query cannot be empty.",
         )
 
-    # 1. Resolve or create user-owned conversation
+    # 1. Resolve or create user-owned conversation if authenticated
     conv = None
-    if req.conversation_id and req.conversation_id.strip():
-        conv = (
-            db.query(Conversation)
-            .filter(Conversation.id == req.conversation_id.strip(), Conversation.user_id == current_user.id)
-            .first()
-        )
-        if not conv:
-            raise HTTPException(
-                status_code=404,
-                detail="Conversation not found or access denied.",
+    if current_user is not None:
+        if req.conversation_id and req.conversation_id.strip():
+            conv = (
+                db.query(Conversation)
+                .filter(Conversation.id == req.conversation_id.strip(), Conversation.user_id == current_user.id)
+                .first()
             )
-    else:
-        title_snippet = req.query.strip().split("\n")[0][:80]
-        conv = Conversation(
-            user_id=current_user.id,
-            title=title_snippet or "New Conversation",
-        )
-        db.add(conv)
-        db.commit()
-        db.refresh(conv)
+            if not conv:
+                raise HTTPException(
+                    status_code=404,
+                    detail="Conversation not found or access denied.",
+                )
+        else:
+            title_snippet = req.query.strip().split("\n")[0][:80]
+            conv = Conversation(
+                user_id=current_user.id,
+                title=title_snippet or "New Conversation",
+            )
+            db.add(conv)
+            db.commit()
+            db.refresh(conv)
 
-    # 2. Persist user message
-    user_msg = Message(
-        conversation_id=conv.id,
-        role="user",
-        content=req.query.strip(),
-    )
-    db.add(user_msg)
-    db.commit()
+        # 2. Persist user message
+        user_msg = Message(
+            conversation_id=conv.id,
+            role="user",
+            content=req.query.strip(),
+        )
+        db.add(user_msg)
+        db.commit()
+    elif req.conversation_id and req.conversation_id.strip():
+        raise HTTPException(
+            status_code=404,
+            detail="Conversation not found or access denied.",
+        )
 
     saved_paths: List[str] = []
 
@@ -309,39 +323,40 @@ async def handle_satquery_json(
             file_paths=saved_paths,
         )
 
-        # 3. Persist assistant message
-        asst_msg = Message(
-            conversation_id=conv.id,
-            role="assistant",
-            content=res.text_answer,
-            visual_evidence=res.visual_evidence,
-            execution_trace=res.execution_trace,
-        )
-        db.add(asst_msg)
+        # 3. Persist assistant message & run metadata if authenticated
+        if current_user is not None and conv is not None:
+            asst_msg = Message(
+                conversation_id=conv.id,
+                role="assistant",
+                content=res.text_answer,
+                visual_evidence=res.visual_evidence,
+                execution_trace=res.execution_trace,
+            )
+            db.add(asst_msg)
 
-        # 4. Persist analysis run
-        b_file = Path(saved_paths[0]).name if len(saved_paths) > 0 else None
-        a_file = Path(saved_paths[1]).name if len(saved_paths) > 1 else None
-        analysis_ref = None
-        if isinstance(res.execution_trace, dict):
-            analysis_ref = res.execution_trace.get("output_dir") or res.execution_trace.get("analysis_reference")
+            b_file = Path(saved_paths[0]).name if len(saved_paths) > 0 else None
+            a_file = Path(saved_paths[1]).name if len(saved_paths) > 1 else None
+            analysis_ref = None
+            if isinstance(res.execution_trace, dict):
+                analysis_ref = res.execution_trace.get("output_dir") or res.execution_trace.get("analysis_reference")
 
-        analysis_run = AnalysisRun(
-            conversation_id=conv.id,
-            user_id=current_user.id,
-            query=req.query.strip(),
-            before_filename=b_file,
-            after_filename=a_file,
-            result_summary=res.text_answer[:400],
-            analysis_reference=str(analysis_ref) if analysis_ref else None,
-            artifacts={"visual_evidence_count": len(res.visual_evidence)},
-        )
-        db.add(analysis_run)
+            analysis_run = AnalysisRun(
+                conversation_id=conv.id,
+                user_id=current_user.id,
+                query=req.query.strip(),
+                before_filename=b_file,
+                after_filename=a_file,
+                result_summary=res.text_answer[:400],
+                analysis_reference=str(analysis_ref) if analysis_ref else None,
+                artifacts={"visual_evidence_count": len(res.visual_evidence)},
+            )
+            db.add(analysis_run)
 
-        conv.updated_at = datetime.now(timezone.utc)
-        db.commit()
+            conv.updated_at = datetime.now(timezone.utc)
+            db.commit()
 
-        res.conversation_id = conv.id
+            res.conversation_id = conv.id
+
         return res
 
     except HTTPException:

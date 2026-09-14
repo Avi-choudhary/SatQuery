@@ -15,6 +15,21 @@ from rasterio.warp import Resampling, calculate_default_transform, reproject
 from pyproj import CRS, Transformer
 from scipy import ndimage
 
+import importlib.util as _importlib_util
+
+_IRMAD_PATH = Path(__file__).resolve().parent / "irmad.py"
+try:
+    _spec = _importlib_util.spec_from_file_location("satquery_irmad", _IRMAD_PATH)
+    irmad_module = _importlib_util.module_from_spec(_spec)
+    import sys as _sys
+    _sys.modules["satquery_irmad"] = irmad_module
+    _spec.loader.exec_module(irmad_module)
+except Exception as _irmad_exc:
+    irmad_module = None
+    _IRMAD_IMPORT_ERROR = _irmad_exc
+else:
+    _IRMAD_IMPORT_ERROR = None
+
 from services.change_detector import (
     clean_change_mask,
     optical_cva,
@@ -2014,6 +2029,78 @@ def _save_geojson(
 # Evidence raster
 # =============================================================================
 
+def _save_mask_web_overlay(
+    changed: np.ndarray,
+    valid: np.ndarray,
+    transform: Affine,
+    crs: CRS,
+    output_path: Path,
+) -> Optional[Dict[str, Any]]:
+    """
+    Write the change mask as an RGBA PNG warped to Web Mercator.
+
+    The pipeline already saves a GeoTIFF mask, but a browser cannot draw one.
+    Warping to EPSG:3857 here means the PNG can be handed straight to a slippy
+    map as an image overlay and land on the right ground at every zoom.
+
+    Returns the placement metadata, or None if the warp fails.
+    """
+    try:
+        from PIL import Image
+
+        height, width = changed.shape
+
+        rgba = np.zeros((height, width, 4), dtype=np.uint8)
+        hit = changed & valid
+        rgba[..., 0][hit] = 255
+        rgba[..., 1][hit] = 59
+        rgba[..., 2][hit] = 48
+        rgba[..., 3][hit] = 190
+
+        dst_transform, dst_width, dst_height = calculate_default_transform(
+            crs, "EPSG:3857", width, height, *rasterio.transform.array_bounds(
+                height, width, transform
+            )
+        )
+
+        warped = np.zeros((4, dst_height, dst_width), dtype=np.uint8)
+        for band in range(4):
+            reproject(
+                source=rgba[..., band],
+                destination=warped[band],
+                src_transform=transform,
+                src_crs=crs,
+                dst_transform=dst_transform,
+                dst_crs="EPSG:3857",
+                resampling=Resampling.nearest,
+            )
+
+        Image.fromarray(
+            np.transpose(warped, (1, 2, 0)), mode="RGBA"
+        ).save(str(output_path), "PNG")
+
+        left, top = dst_transform * (0, 0)
+        right, bottom = dst_transform * (dst_width, dst_height)
+        transformer = Transformer.from_crs("EPSG:3857", "EPSG:4326", always_xy=True)
+        min_lon, min_lat = transformer.transform(left, bottom)
+        max_lon, max_lat = transformer.transform(right, top)
+
+        return {
+            "wgs84_bounds": [
+                round(float(min_lon), 8),
+                round(float(min_lat), 8),
+                round(float(max_lon), 8),
+                round(float(max_lat), 8),
+            ],
+            "width": int(dst_width),
+            "height": int(dst_height),
+        }
+
+    except Exception as exc:
+        print(f"[Change overlay warning]: {type(exc).__name__}: {exc}")
+        return None
+
+
 def _save_mask_raster(
     mask: np.ndarray,
     transform: Affine,
@@ -3990,6 +4077,19 @@ def _analyse_pair(
             / "atmospheric_mask.tif"
         )
 
+        mask_overlay_path = (
+            output_folder
+            / "change_mask_web.png"
+        )
+
+        mask_overlay = _save_mask_web_overlay(
+            changed,
+            valid,
+            grid["transform"],
+            grid["crs"],
+            mask_overlay_path,
+        )
+
         _save_mask_raster(
             changed,
             grid["transform"],
@@ -4305,13 +4405,40 @@ def _analyse_pair(
         # Evidence paths returned to frontend
         # ---------------------------------------------------------------------
 
-        evidence: List[str] = [
-            str(mask_path),
-            str(magnitude_path),
-            str(geojson_path),
-            str(metadata_path),
-            str(atmospheric_mask_path),
-        ]
+        evidence: List[Any] = []
+        if geojson_path.exists():
+            try:
+                evidence.append(json.loads(geojson_path.read_text(encoding="utf-8")))
+            except Exception:
+                evidence.append(str(geojson_path))
+        else:
+            evidence.append(str(geojson_path))
+
+        if mask_overlay is not None:
+            relative = mask_overlay_path.relative_to(OUTPUT_DIR.parent).as_posix()
+            evidence.append(
+                {
+                    "type": "ImageOverlay",
+                    "label": "Detected change",
+                    "url": f"/static/outputs/{relative}",
+                    "wgs84_bounds": mask_overlay["wgs84_bounds"],
+                    "opacity": 0.7,
+                }
+            )
+            tracer.append_log(
+                "step 15.1: wrote Web-Mercator change-mask overlay "
+                f"({mask_overlay['width']}x{mask_overlay['height']} px)"
+            )
+
+        evidence.extend(
+            [
+                str(mask_path),
+                str(magnitude_path),
+                str(geojson_path),
+                str(metadata_path),
+                str(atmospheric_mask_path),
+            ]
+        )
 
         tracer.append_log(
             "step 15: saved spatial evidence and analysis metadata"

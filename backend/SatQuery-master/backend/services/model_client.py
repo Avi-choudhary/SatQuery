@@ -191,6 +191,7 @@ def query_model(
     # -------------------------------------------------------------
     # Case 3: Offline Fallback (If PC is offline and laptop has no GPU)
     # -------------------------------------------------------------
+    detections = []
     try:
         from satquery_model import SatQueryVLM
         detections = SatQueryVLM._parse_bounding_boxes(
@@ -199,37 +200,98 @@ def query_model(
             img_height=256,
             geotiff_path_or_profile=geotiff_path
         )
-
-        fallback_answer = (
-            "सूचना: बैकएंड डेमो मोड में चल रहा है।" 
-            if "Hindi" in lang_rule else 
-            "Notice: Running in demo fallback mode."
-        )
-
-        return {
-            "answer": fallback_answer,
-            "has_bbox": len(detections) > 0,
-            "detections": detections,
-            "bbox_normalized": detections[0]["normalized"] if detections else None,
-            "bbox_pixel": detections[0]["pixel"] if detections else None,
-            "wgs84_bbox": detections[0]["wgs84"] if detections else None,
-            "geojson": detections[0]["geojson"] if detections else None,
-            "latency_ms": 10.0,
-            "device": "offline_fallback",
-            "execution_mode": "offline_fallback"
-        }
     except Exception:
-        fallback_answer = (
-            "SatQuery AI विश्लेषण पूर्ण हुआ।" 
-            if "Hindi" in lang_rule else 
-            "SatQuery AI analysis complete."
+        detections = _parse_fallback_box(
+            text="[0.30 0.35, 0.70 0.75]",
+            img_width=256,
+            img_height=256,
+            geotiff_path=geotiff_path
         )
-        return {
-            "answer": fallback_answer,
-            "has_bbox": False,
-            "detections": [],
-            "geojson": None,
-            "latency_ms": 0.0,
-            "device": "none",
-            "execution_mode": "offline_fallback"
+
+    fallback_answer = (
+        "सूचना: बैकएंड डेमो मोड में चल रहा है।" 
+        if "Hindi" in lang_rule else 
+        "Notice: Running in demo fallback mode."
+    )
+
+    return {
+        "answer": fallback_answer,
+        "has_bbox": len(detections) > 0,
+        "detections": detections,
+        "bbox_normalized": detections[0]["normalized"] if detections else None,
+        "bbox_pixel": detections[0]["pixel"] if detections else None,
+        "wgs84_bbox": detections[0]["wgs84"] if detections else None,
+        "geojson": detections[0]["geojson"] if detections else None,
+        "latency_ms": 10.0,
+        "device": "offline_fallback",
+        "execution_mode": "offline_fallback"
+    }
+
+
+def _parse_fallback_box(
+    text: str = "[0.30 0.35, 0.70 0.75]",
+    img_width: int = 256,
+    img_height: int = 256,
+    geotiff_path: Optional[Union[str, Path]] = None,
+) -> List[Dict[str, Any]]:
+    import re
+    pattern = r"(?:<box>)?\[([0-9.]+)[,\s]+([0-9.]+)[,\s]+([0-9.]+)[,\s]+([0-9.]+)\](?:</box>)?"
+    match = re.search(pattern, text)
+    if not match:
+        return []
+    c1, c2, c3, c4 = [float(x) for x in match.groups()]
+    ymin = max(0.0, min(1.0, min(c1, c3)))
+    ymax = max(0.0, min(1.0, max(c1, c3)))
+    xmin = max(0.0, min(1.0, min(c2, c4)))
+    xmax = max(0.0, min(1.0, max(c2, c4)))
+
+    pixel_bbox = [int(xmin * img_width), int(ymin * img_height), int(xmax * img_width), int(ymax * img_height)]
+    wgs84_bbox = None
+    wgs84_coords = None
+
+    if geotiff_path and os.path.exists(str(geotiff_path)):
+        try:
+            import rasterio
+            from rasterio.windows import Window
+            from rasterio.warp import transform_bounds
+            with rasterio.open(str(geotiff_path)) as src:
+                rw = src.width
+                rh = src.height
+                window = Window(int(xmin * rw), int(ymin * rh), max(1, int((xmax - xmin) * rw)), max(1, int((ymax - ymin) * rh)))
+                native_bounds = rasterio.windows.bounds(window, src.transform)
+                if str(src.crs).upper() not in ["EPSG:4326", "WGS 84", "OGC:CRS84"]:
+                    wgs84_bounds = list(transform_bounds(src.crs, "EPSG:4326", *native_bounds))
+                else:
+                    wgs84_bounds = list(native_bounds)
+                wgs84_bbox = [round(float(b), 6) for b in wgs84_bounds]
+        except Exception:
+            pass
+
+    if wgs84_bbox is not None:
+        min_lon, min_lat, max_lon, max_lat = wgs84_bbox
+        wgs84_coords = [[[min_lon, min_lat], [max_lon, min_lat], [max_lon, max_lat], [min_lon, max_lat], [min_lon, min_lat]]]
+
+    geom_coords = wgs84_coords if wgs84_coords is not None else [[[xmin, ymin], [xmax, ymin], [xmax, ymax], [xmin, ymax], [xmin, ymin]]]
+
+    geojson_feature = {
+        "type": "Feature",
+        "geometry": {
+            "type": "Polygon",
+            "coordinates": geom_coords
+        },
+        "properties": {
+            "id": 1,
+            "label": "Detection 1",
+            "crs": "EPSG:4326" if wgs84_coords is not None else "relative",
+            "normalized_bbox": [round(ymin, 4), round(xmin, 4), round(ymax, 4), round(xmax, 4)],
+            "pixel_bbox": pixel_bbox,
+            "wgs84_bbox": wgs84_bbox
         }
+    }
+
+    return [{
+        "normalized": [round(ymin, 4), round(xmin, 4), round(ymax, 4), round(xmax, 4)],
+        "pixel": pixel_bbox,
+        "wgs84": wgs84_bbox,
+        "geojson": geojson_feature
+    }]
