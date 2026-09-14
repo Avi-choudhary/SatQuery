@@ -3,37 +3,37 @@ import sys
 from pathlib import Path
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 
 # Ensure current directory is on sys.path
 current_dir = Path(__file__).resolve().parent
 if str(current_dir) not in sys.path:
     sys.path.insert(0, str(current_dir))
 
-try:
-    from api.routes import router as api_router
-except ImportError:
-    from backend.api.routes import router as api_router
-
-from core.config import HOST, PORT, MODEL_SERVICE_URL, get_lan_ip
+from core.config import HOST, PORT, MODEL_SERVICE_URL, get_lan_ip, CORS_ORIGINS
+from api.routes import router as satquery_router
+from api.auth_routes import router as auth_router
+from api.conversation_routes import router as conversation_router
 
 app = FastAPI(
     title="SatQuery AI Backend",
     description="Central Agentic Controller for Satellite Remote Sensing (SIH 2026 / ISRO PS 26167)",
-    version="1.0.0"
+    version="1.0.0",
 )
 
-# Configure CORS so any laptop on the LAN or local Vite dev server can connect
+# Configure CORS so local Vite dev server and remote hosts can make credentialed requests
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=CORS_ORIGINS if CORS_ORIGINS else ["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-from fastapi.staticfiles import StaticFiles
-
-app.include_router(api_router, prefix="/api/v1")
+# Mount API routers
+app.include_router(auth_router, prefix="/api/v1")
+app.include_router(conversation_router, prefix="/api/v1")
+app.include_router(satquery_router, prefix="/api/v1")
 
 # Feature: Interactive Map STAC/COG AOI Streamer (Phase 2)
 ENABLE_INTERACTIVE_MAP = True
@@ -49,15 +49,16 @@ static_dir = os.path.join(current_dir, "temp_uploads")
 os.makedirs(static_dir, exist_ok=True)
 app.mount("/static", StaticFiles(directory=static_dir), name="static")
 
-# Mount output directory for ChangeFormer generated masks, rasters, and GeoJSON files
+# Mount output directory for ChangeFormer / Change Detective masks, rasters, and GeoJSON files
 candidate_output_dirs = [
+    current_dir / "outputs",
     current_dir.parents[2] / "Bi-Temporal ChangeFormer" / "SatqueryAI" / "backend" / "outputs",
     current_dir.parents[1] / "Bi-Temporal ChangeFormer" / "SatqueryAI" / "backend" / "outputs",
-    Path(r"c:\Games\SatQuery\Bi-Temporal ChangeFormer\SatqueryAI\backend\outputs"),
+    Path("/Users/divyatewari/Desktop/SatqueryAI/backend/outputs"),
 ]
 outputs_dir = candidate_output_dirs[0]
 for cand in candidate_output_dirs:
-    if cand.parent.exists():
+    if cand.exists():
         outputs_dir = cand
         break
 os.makedirs(outputs_dir, exist_ok=True)
@@ -72,7 +73,14 @@ def root():
         "status": "online",
         "local_url": f"http://localhost:{PORT}/api/v1",
         "documentation": f"http://localhost:{PORT}/docs",
-        "remote_gpu_url": MODEL_SERVICE_URL if MODEL_SERVICE_URL else "Running on local GPU"
+        "remote_gpu_url": MODEL_SERVICE_URL if MODEL_SERVICE_URL else "Running on local GPU",
+    }
+
+
+@app.get("/health")
+def health():
+    return {
+        "status": "ok",
     }
 
 
@@ -90,6 +98,8 @@ def system_status():
         if gpu_available:
             gpu_name = torch.cuda.get_device_name(0)
             vram_gb = round(torch.cuda.get_device_properties(0).total_memory / (1024 ** 3), 2)
+        elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+            gpu_name = "Apple Silicon (MPS)"
     except Exception:
         pass
 
@@ -121,18 +131,18 @@ def system_status():
             "remote_vram": remote_vram,
             "local_cuda_available": gpu_available,
             "local_device": gpu_name,
-            "local_vram_gb": vram_gb
+            "local_vram_gb": vram_gb,
         },
         "network": {
             "lan_ip": lan_ip,
             "port": PORT,
-            "api_endpoint": f"http://localhost:{PORT}/api/v1/satquery"
+            "api_endpoint": f"http://localhost:{PORT}/api/v1/satquery",
         },
         "specialists": {
             "tool_1_vqa": "ready (Qwen3-VL-2B-SatQuery Multimodal S1/S2)",
             "tool_2_grounding": "ready (WGS84 GeoJSON polygon projection)",
-            "tool_3_change_detection": "ready (ChangeFormerV6 + IR-MAD + CVA)"
-        }
+            "tool_3_change_detection": "ready (Bi-Temporal V2 Change Detective + ChangeFormerV6 + IR-MAD + CVA)",
+        },
     }
 
 

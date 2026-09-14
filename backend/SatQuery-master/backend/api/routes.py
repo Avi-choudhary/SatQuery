@@ -1,101 +1,104 @@
 import os
 import shutil
+import uuid
 import base64
-from typing import List, Optional
+import math
+import time
 from pathlib import Path
-from fastapi import APIRouter, UploadFile, File, Form, HTTPException
+from typing import List, Optional
+
+from datetime import datetime, timezone
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from pydantic import BaseModel
-from schemas.responses import SatQueryResponse
+from sqlalchemy.orm import Session
+
+from auth.dependencies import get_current_user
 from core.agent import process_query
+from db.session import get_db
+from models.analysis_run import AnalysisRun
+from models.conversation import Conversation
+from models.message import Message
+from models.user import User
+from schemas.responses import SatQueryResponse
+from utils import gis_pipeline
+
 
 router = APIRouter()
 
-BACKEND_DIR = Path(__file__).resolve().parent.parent
-TEMP_DIR = str(BACKEND_DIR / "temp_uploads")
-os.makedirs(TEMP_DIR, exist_ok=True)
+BASE_DIR = Path(__file__).resolve().parents[1]
+TEMP_DIR = BASE_DIR / "temp_uploads"
+TEMP_DIR.mkdir(parents=True, exist_ok=True)
 
+CANDIDATE_SEARCH_DIRS = [
+    TEMP_DIR,
+    BASE_DIR.parents[2] / "backend" / "temp_uploads",
+    BASE_DIR.parents[3] / "backend" / "temp_uploads",
+    Path("/Users/divyatewari/Desktop/SatqueryAI/backend/temp_uploads"),
+]
 
-def _get_fallback_imagery() -> List[str]:
-    """Finds the most recently uploaded or valid satellite scene for queries submitted without file payloads."""
-    # 1. Look in TEMP_DIR for user-uploaded satellite images (preferring newest, excluding previews)
-    if os.path.exists(TEMP_DIR):
-        candidates = []
-        for f in os.listdir(TEMP_DIR):
-            if f.startswith("prev_"):
-                continue
-            if f.lower().endswith((".tif", ".tiff", ".png", ".jpg", ".jpeg")):
-                full_path = os.path.join(TEMP_DIR, f)
-                if os.path.isfile(full_path) and os.path.getsize(full_path) > 1000:
-                    candidates.append(full_path)
-
-        if candidates:
-            # Sort newest first
-            candidates.sort(key=lambda p: os.path.getmtime(p), reverse=True)
-            return [candidates[0]]
-
-    # 2. Check sample images in workspace
-    workspace_root = Path(__file__).resolve().parents[3]
-    sample_dirs = [
-        workspace_root / "Model Training" / "data" / "images",
-        workspace_root / "gis_extraction_logic" / "data"
-    ]
-    for sdir in sample_dirs:
-        if sdir.exists():
-            for f in sdir.glob("*.*"):
-                if f.suffix.lower() in [".tif", ".tiff", ".png", ".jpg"]:
-                    return [str(f)]
-
-    # 3. Create a lightweight sample preview GeoTIFF/PNG
-    sample_path = os.path.join(TEMP_DIR, "Bengaluru_Urban_Corridor_T1_T2.png")
-    if not os.path.exists(sample_path):
-        from PIL import Image
-        img = Image.new("RGB", (256, 256), color=(40, 80, 50))
-        img.save(sample_path)
-    return [sample_path]
+ALLOWED_EXTENSIONS = {
+    ".tif",
+    ".tiff",
+    ".png",
+    ".jpg",
+    ".jpeg",
+}
 
 
 def _resolve_target_imagery(dataset_name: Optional[str] = None) -> List[str]:
-    """Resolves target imagery path from dataset_name or returns the newest uploaded satellite scene."""
+    search_dirs = [d for d in CANDIDATE_SEARCH_DIRS if d.exists()]
+
     if isinstance(dataset_name, str) and dataset_name.strip() and dataset_name.strip().lower() not in ["uploaded scene", "none", "null"]:
         clean = dataset_name.strip()
         clean_lower = clean.lower()
 
-        # Check for bi-temporal preset references (Bengaluru urban corridor)
         if "bengaluru" in clean_lower and ("t1_t2" in clean_lower or "pair" in clean_lower or "urban" in clean_lower):
-            t1 = os.path.join(TEMP_DIR, "Bengaluru_T1_Pre.png")
-            t2 = os.path.join(TEMP_DIR, "Bengaluru_T2_Post.png")
-            if os.path.exists(t1) and os.path.exists(t2):
-                return [t1, t2]
+            for sdir in search_dirs:
+                t1 = sdir / "Bengaluru_T1_Pre.png"
+                t2 = sdir / "Bengaluru_T2_Post.png"
+                if t1.exists() and t2.exists():
+                    return [str(t1), str(t2)]
 
-        # Check for bi-temporal preset references (Delhi multi-year)
         if "delhi" in clean_lower and ("pair" in clean_lower or "temporal" in clean_lower or "change" in clean_lower):
-            t1 = os.path.join(TEMP_DIR, "east_delhi_2018_S2.tif")
-            t2 = os.path.join(TEMP_DIR, "delhi_20260112_S2.tif")
-            if os.path.exists(t1) and os.path.exists(t2):
-                return [t1, t2]
+            for sdir in search_dirs:
+                t1 = sdir / "east_delhi_2018_S2.tif"
+                t2 = sdir / "delhi_20260112_S2.tif"
+                if t1.exists() and t2.exists():
+                    return [str(t1), str(t2)]
 
-        # Direct check in TEMP_DIR
-        cand = os.path.join(TEMP_DIR, clean)
-        if os.path.exists(cand) and os.path.isfile(cand):
-            return [cand]
-        # Look for matching filename or stem in TEMP_DIR (case-insensitive)
+        for sdir in search_dirs:
+            cand = sdir / clean
+            if cand.exists() and cand.is_file():
+                return [str(cand)]
+
         clean_stem = Path(clean).stem.lower()
-        if os.path.exists(TEMP_DIR):
-            for fname in os.listdir(TEMP_DIR):
-                if fname.startswith("prev_"):
+        for sdir in search_dirs:
+            for f in sdir.iterdir():
+                if f.name.startswith("prev_"):
                     continue
-                if fname.lower() == clean_lower or Path(fname).stem.lower() == clean_stem:
-                    full = os.path.join(TEMP_DIR, fname)
-                    if os.path.isfile(full):
-                        return [full]
+                if f.name.lower() == clean_lower or f.stem.lower() == clean_stem:
+                    if f.is_file():
+                        return [str(f)]
 
-    return _get_fallback_imagery()
+    for sdir in search_dirs:
+        candidates = []
+        for f in sdir.iterdir():
+            if f.name.startswith("prev_") or f.name.startswith("."):
+                continue
+            if f.suffix.lower() in ALLOWED_EXTENSIONS and f.is_file() and f.stat().st_size > 1000:
+                candidates.append(f)
+        if candidates:
+            candidates.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+            return [str(candidates[0])]
+
+    return []
 
 
 class JsonQueryRequest(BaseModel):
     query: str
     dataset_name: Optional[str] = None
     image_base64: Optional[str] = None
+    conversation_id: Optional[str] = None
 
 
 @router.post("/satquery", response_model=SatQueryResponse)
@@ -104,171 +107,326 @@ async def handle_satquery(
     files: Optional[List[UploadFile]] = File(None),
     before_file: Optional[UploadFile] = File(None),
     after_file: Optional[UploadFile] = File(None),
-    dataset_name: Optional[str] = Form(None)
+    dataset_name: Optional[str] = Form(None),
+    conversation_id: Optional[str] = Form(None),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
 ):
-    saved_file_paths = []
-    clean_dataset_name = dataset_name if isinstance(dataset_name, str) else None
+    if not query.strip():
+        raise HTTPException(
+            status_code=400,
+            detail="Query cannot be empty.",
+        )
+
+    # 1. Resolve or create user-owned conversation
+    conv = None
+    if conversation_id and conversation_id.strip():
+        conv = (
+            db.query(Conversation)
+            .filter(Conversation.id == conversation_id.strip(), Conversation.user_id == current_user.id)
+            .first()
+        )
+        if not conv:
+            raise HTTPException(
+                status_code=404,
+                detail="Conversation not found or access denied.",
+            )
+    else:
+        title_snippet = query.strip().split("\n")[0][:80]
+        conv = Conversation(
+            user_id=current_user.id,
+            title=title_snippet or "New Conversation",
+        )
+        db.add(conv)
+        db.commit()
+        db.refresh(conv)
+
+    # 2. Persist user message
+    user_msg = Message(
+        conversation_id=conv.id,
+        role="user",
+        content=query.strip(),
+    )
+    db.add(user_msg)
+    db.commit()
+
+    saved_paths: List[str] = []
+
     try:
         if files and isinstance(files, (list, tuple)):
-            for file in files:
-                if hasattr(file, "filename") and bool(file.filename) and hasattr(file, "file"):
-                    file_location = os.path.join(TEMP_DIR, file.filename)
-                    with open(file_location, "wb") as buffer:
-                        shutil.copyfileobj(file.file, buffer)
-                    saved_file_paths.append(file_location)
+            for upload in files:
+                if hasattr(upload, "filename") and bool(upload.filename) and hasattr(upload, "file"):
+                    suffix = Path(upload.filename).suffix.lower()
+                    if suffix not in ALLOWED_EXTENSIONS:
+                        raise HTTPException(
+                            status_code=400,
+                            detail=f"Unsupported file type: {suffix}. Supported: {', '.join(ALLOWED_EXTENSIONS)}",
+                        )
+                    dest = TEMP_DIR / f"{uuid.uuid4().hex}_{upload.filename}"
+                    with dest.open("wb") as out:
+                        shutil.copyfileobj(upload.file, out)
+                    saved_paths.append(str(dest))
 
-        # Also support dedicated before_file and after_file fields
-        for file in [before_file, after_file]:
-            if hasattr(file, "filename") and bool(file.filename) and hasattr(file, "file"):
-                file_location = os.path.join(TEMP_DIR, file.filename)
-                with open(file_location, "wb") as buffer:
-                    shutil.copyfileobj(file.file, buffer)
-                saved_file_paths.append(file_location)
+        for upload in [before_file, after_file]:
+            if hasattr(upload, "filename") and bool(upload.filename) and hasattr(upload, "file"):
+                suffix = Path(upload.filename).suffix.lower()
+                if suffix not in ALLOWED_EXTENSIONS:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Unsupported file type: {suffix}. Supported: {', '.join(ALLOWED_EXTENSIONS)}",
+                    )
+                dest = TEMP_DIR / f"{uuid.uuid4().hex}_{upload.filename}"
+                with dest.open("wb") as out:
+                    shutil.copyfileobj(upload.file, out)
+                saved_paths.append(str(dest))
 
-        # Trigger cached preview generation for any uploaded GeoTIFFs immediately
-        for p_loc in saved_file_paths:
-            if p_loc.lower().endswith((".tif", ".tiff")):
-                try:
-                    _generate_raster_preview(p_loc)
-                except Exception:
-                    pass
+        clean_dataset_name = dataset_name if isinstance(dataset_name, str) else None
+        if not saved_paths:
+            saved_paths = _resolve_target_imagery(clean_dataset_name)
 
-        # If no files in this multipart request, resolve via dataset_name or newest uploaded scene
-        if not saved_file_paths:
-            saved_file_paths = _resolve_target_imagery(clean_dataset_name)
+        if not saved_paths:
+            raise HTTPException(
+                status_code=400,
+                detail="At least one satellite image is required or must be selected via dataset_name.",
+            )
 
-        # process_query receives the query string (including any hidden [Instruction: ...] tags)
-        response = await process_query(query, saved_file_paths)
-        return response
+        res = await process_query(
+            query=query,
+            file_paths=saved_paths,
+        )
 
-    except Exception as e:
-        is_hindi = "[Instruction: Respond strictly in Hindi" in query
-        detail_msg = f"क्वेरी संसाधित करने में त्रुटि: {str(e)}" if is_hindi else f"Query processing error: {str(e)}"
-        raise HTTPException(status_code=500, detail=detail_msg)
+        # 3. Persist assistant message
+        asst_msg = Message(
+            conversation_id=conv.id,
+            role="assistant",
+            content=res.text_answer,
+            visual_evidence=res.visual_evidence,
+            execution_trace=res.execution_trace,
+        )
+        db.add(asst_msg)
+
+        # 4. Persist analysis run metadata
+        b_file = Path(saved_paths[0]).name if len(saved_paths) > 0 else None
+        a_file = Path(saved_paths[1]).name if len(saved_paths) > 1 else None
+        analysis_ref = None
+        if isinstance(res.execution_trace, dict):
+            analysis_ref = res.execution_trace.get("output_dir") or res.execution_trace.get("analysis_reference")
+
+        analysis_run = AnalysisRun(
+            conversation_id=conv.id,
+            user_id=current_user.id,
+            query=query.strip(),
+            before_filename=b_file,
+            after_filename=a_file,
+            result_summary=res.text_answer[:400],
+            analysis_reference=str(analysis_ref) if analysis_ref else None,
+            artifacts={"visual_evidence_count": len(res.visual_evidence)},
+        )
+        db.add(analysis_run)
+
+        conv.updated_at = datetime.now(timezone.utc)
+        db.commit()
+
+        res.conversation_id = conv.id
+        return res
+
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=f"SatQuery execution error: {str(exc)}",
+        )
 
 
 @router.post("/satquery/json", response_model=SatQueryResponse)
-async def handle_satquery_json(req: JsonQueryRequest):
-    """Convenient JSON endpoint for web frontends without requiring multipart boundary parsing."""
+async def handle_satquery_json(
+    req: JsonQueryRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    if not req.query.strip():
+        raise HTTPException(
+            status_code=400,
+            detail="Query cannot be empty.",
+        )
+
+    # 1. Resolve or create user-owned conversation
+    conv = None
+    if req.conversation_id and req.conversation_id.strip():
+        conv = (
+            db.query(Conversation)
+            .filter(Conversation.id == req.conversation_id.strip(), Conversation.user_id == current_user.id)
+            .first()
+        )
+        if not conv:
+            raise HTTPException(
+                status_code=404,
+                detail="Conversation not found or access denied.",
+            )
+    else:
+        title_snippet = req.query.strip().split("\n")[0][:80]
+        conv = Conversation(
+            user_id=current_user.id,
+            title=title_snippet or "New Conversation",
+        )
+        db.add(conv)
+        db.commit()
+        db.refresh(conv)
+
+    # 2. Persist user message
+    user_msg = Message(
+        conversation_id=conv.id,
+        role="user",
+        content=req.query.strip(),
+    )
+    db.add(user_msg)
+    db.commit()
+
+    saved_paths: List[str] = []
+
     try:
-        saved_file_paths = []
         if req.image_base64:
-            # Decode base64 to temp file
             data = req.image_base64
             if "," in data:
                 data = data.split(",", 1)[1]
             b_bytes = base64.b64decode(data)
-            fname = os.path.join(TEMP_DIR, f"upload_{int(os.path.getmtime(TEMP_DIR))}.png")
-            with open(fname, "wb") as f:
+            fname = TEMP_DIR / f"upload_{uuid.uuid4().hex}.png"
+            with fname.open("wb") as f:
                 f.write(b_bytes)
-            saved_file_paths.append(fname)
+            saved_paths.append(str(fname))
         else:
-            saved_file_paths = _resolve_target_imagery(req.dataset_name)
+            saved_paths = _resolve_target_imagery(req.dataset_name)
 
-        return await process_query(req.query, saved_file_paths)
-    except Exception as e:
-        is_hindi = "[Instruction: Respond strictly in Hindi" in req.query
-        detail_msg = f"क्वेरी संसाधित करने में त्रुटि: {str(e)}" if is_hindi else f"Query processing error: {str(e)}"
-        raise HTTPException(status_code=500, detail=detail_msg)
+        if not saved_paths:
+            raise HTTPException(
+                status_code=400,
+                detail="At least one satellite image is required or must be selected via dataset_name.",
+            )
+
+        res = await process_query(
+            query=req.query,
+            file_paths=saved_paths,
+        )
+
+        # 3. Persist assistant message
+        asst_msg = Message(
+            conversation_id=conv.id,
+            role="assistant",
+            content=res.text_answer,
+            visual_evidence=res.visual_evidence,
+            execution_trace=res.execution_trace,
+        )
+        db.add(asst_msg)
+
+        # 4. Persist analysis run
+        b_file = Path(saved_paths[0]).name if len(saved_paths) > 0 else None
+        a_file = Path(saved_paths[1]).name if len(saved_paths) > 1 else None
+        analysis_ref = None
+        if isinstance(res.execution_trace, dict):
+            analysis_ref = res.execution_trace.get("output_dir") or res.execution_trace.get("analysis_reference")
+
+        analysis_run = AnalysisRun(
+            conversation_id=conv.id,
+            user_id=current_user.id,
+            query=req.query.strip(),
+            before_filename=b_file,
+            after_filename=a_file,
+            result_summary=res.text_answer[:400],
+            analysis_reference=str(analysis_ref) if analysis_ref else None,
+            artifacts={"visual_evidence_count": len(res.visual_evidence)},
+        )
+        db.add(analysis_run)
+
+        conv.updated_at = datetime.now(timezone.utc)
+        db.commit()
+
+        res.conversation_id = conv.id
+        return res
+
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=f"SatQuery JSON execution error: {str(exc)}",
+        )
 
 
-def _generate_raster_preview(file_path: str) -> Optional[str]:
-    """Generates an RGB thumbnail PNG for a GeoTIFF or standard raster image."""
+def _generate_raster_preview(file_path: Path) -> Optional[str]:
     try:
-        from PIL import Image
-        import numpy as np
-
-        stem = Path(file_path).stem
-        preview_filename = f"prev_{stem}.png"
-        preview_path = os.path.join(TEMP_DIR, preview_filename)
-
-        if os.path.exists(preview_path) and os.path.getsize(preview_path) > 1000:
-            return preview_filename
-
-        if file_path.lower().endswith((".tif", ".tiff")):
+        stem = file_path.stem
+        prev_name = f"prev_{stem}.png"
+        prev_path = TEMP_DIR / prev_name
+        if prev_path.exists() and prev_path.stat().st_size > 1000:
+            return prev_name
+        if file_path.suffix.lower() in {".tif", ".tiff"}:
             import rasterio
+            import numpy as np
+            from PIL import Image
             with rasterio.open(file_path) as src:
-                factor = max(1, src.height // 600)
+                factor = max(1, max(src.height, src.width) // 512)
                 h, w = max(1, src.height // factor), max(1, src.width // factor)
                 if src.count >= 3:
-                    # In Sentinel-2 products, Band 1 is Red (B4), Band 2 is Green (B3), Band 3 is Blue (B2)
-                    b_r = src.read(1, out_shape=(h, w))
-                    b_g = src.read(2, out_shape=(h, w))
-                    b_b = src.read(3, out_shape=(h, w))
+                    r = src.read(1, out_shape=(h, w))
+                    g = src.read(2, out_shape=(h, w))
+                    b = src.read(3, out_shape=(h, w))
                 else:
-                    b_r = b_g = b_b = src.read(1, out_shape=(h, w))
-
-                def norm(b):
-                    valid = b[b > 0]
-                    if valid.size > 0:
-                        p2, p98 = np.percentile(valid, (2, 98))
-                        if p98 <= p2:
-                            p2, p98 = float(valid.min()), float(valid.max())
-                    else:
-                        p2, p98 = 0.0, 255.0
-                    clipped = np.clip(b, p2, p98)
-                    denom = max(1e-6, float(p98 - p2))
-                    return ((clipped - p2) / denom * 255).astype(np.uint8)
-
-                rgb = np.stack([norm(b_r), norm(b_g), norm(b_b)], axis=-1)
-                im = Image.fromarray(rgb)
-                im.save(preview_path, "PNG")
-                return preview_filename
-        else:
-            im = Image.open(file_path).convert("RGB")
-            im.thumbnail((800, 800))
-            im.save(preview_path, "PNG")
-            return preview_filename
-    except Exception as e:
-        print(f"[Preview Generation Warning]: {e}")
-        return None
+                    r = g = b = src.read(1, out_shape=(h, w))
+                rgb = np.stack([r, g, b], axis=-1).astype(np.float32)
+                for c in range(3):
+                    lo, hi = np.percentile(rgb[..., c], [2, 98])
+                    if hi > lo:
+                        rgb[..., c] = np.clip((rgb[..., c] - lo) / (hi - lo), 0, 1)
+                img = Image.fromarray((rgb * 255).astype(np.uint8))
+                img.save(prev_path)
+                return prev_name
+        elif file_path.suffix.lower() in {".png", ".jpg", ".jpeg"}:
+            from PIL import Image
+            img = Image.open(file_path)
+            img.thumbnail((512, 512))
+            img.save(prev_path, "PNG")
+            return prev_name
+    except Exception:
+        pass
+    return None
 
 
-def _calculate_area_sq_km(bounds: List[float], center_lat: float) -> float:
-    import math
-    min_lon, min_lat, max_lon, max_lat = bounds
-    lat_dist = abs(max_lat - min_lat) * 110.574
-    lon_dist = abs(max_lon - min_lon) * (111.320 * math.cos(math.radians(center_lat)))
+def _calculate_area_sq_km(bounds: List[float], center_lat: Optional[float] = None) -> float:
+    if not bounds or len(bounds) != 4:
+        return 0.0
+    lat = center_lat if center_lat is not None else (bounds[1] + bounds[3]) / 2.0
+    lat_dist = abs(bounds[3] - bounds[1]) * 110.574
+    lon_dist = abs(bounds[2] - bounds[0]) * (111.320 * math.cos(math.radians(lat)))
     return round(lat_dist * lon_dist, 2)
 
 
 @router.post("/imagery/upload")
 async def upload_imagery(
     files: List[UploadFile] = File(...),
-    sensor_type: Optional[str] = Form(None)
+    sensor_type: Optional[str] = Form(None),
 ):
-    """
-    Ingests single or bi-temporal satellite rasters (GeoTIFF, COG, PNG).
-    Extracts geographic WGS84 bounds, center coordinates, CRS, sensor resolution,
-    and returns georeferenced raster preview URLs for MapLibre map overlay.
-    """
-    import time
-    from utils import gis_pipeline
-
     if not files:
         raise HTTPException(status_code=400, detail="No files uploaded.")
+    saved_paths: List[str] = []
+    for file in files:
+        if file.filename:
+            dest = TEMP_DIR / file.filename
+            if not (dest.exists() and dest.stat().st_size > 0):
+                with dest.open("wb") as buffer:
+                    shutil.copyfileobj(file.file, buffer)
+            saved_paths.append(str(dest))
+    if not saved_paths:
+        raise HTTPException(status_code=400, detail="Failed to save uploaded imagery.")
 
-    saved_paths = []
     try:
-        for file in files:
-            if file.filename:
-                file_location = os.path.join(TEMP_DIR, file.filename)
-                # Avoid redundant disk writes if identical file already exists
-                if not (os.path.exists(file_location) and os.path.getsize(file_location) > 0):
-                    with open(file_location, "wb") as buffer:
-                        shutil.copyfileobj(file.file, buffer)
-                saved_paths.append(file_location)
-
-        if not saved_paths:
-            raise HTTPException(status_code=400, detail="Failed to save uploaded imagery.")
-
         # Build the map overlay. For a georeferenced raster this warps to Web
         # Mercator so the PNG registers exactly; for a plain image it falls
         # back to a thumbnail that carries no geographic claim.
         info_t1 = gis_pipeline.get_geotiff_info(saved_paths[0])
-        overlay_t1 = gis_pipeline.build_web_overlay(saved_paths[0], output_dir=TEMP_DIR)
+        overlay_t1 = gis_pipeline.build_web_overlay(saved_paths[0], output_dir=str(TEMP_DIR))
         overlay_t2 = (
-            gis_pipeline.build_web_overlay(saved_paths[1], output_dir=TEMP_DIR)
+            gis_pipeline.build_web_overlay(saved_paths[1], output_dir=str(TEMP_DIR))
             if len(saved_paths) > 1
             else None
         )
@@ -281,7 +439,7 @@ async def upload_imagery(
             # a rotated scene is not.
             bounds = overlay_t1["wgs84_bounds"]
         else:
-            prev_t1 = _generate_raster_preview(saved_paths[0]) or os.path.basename(saved_paths[0])
+            prev_t1 = _generate_raster_preview(Path(saved_paths[0])) or os.path.basename(saved_paths[0])
             bounds = info_t1.get("wgs84_bounds")
 
         prev_t2 = None
@@ -289,7 +447,7 @@ async def upload_imagery(
             if overlay_t2 is not None:
                 prev_t2 = overlay_t2["png_name"]
             else:
-                prev_t2 = _generate_raster_preview(saved_paths[1]) or os.path.basename(saved_paths[1])
+                prev_t2 = _generate_raster_preview(Path(saved_paths[1])) or os.path.basename(saved_paths[1])
 
         # A file with no CRS cannot be placed on a map. Say so instead of
         # dropping it over Bengaluru, which is what this used to do.
@@ -331,7 +489,6 @@ async def upload_imagery(
 
 @router.get("/imagery/presets")
 def get_imagery_presets():
-    """Returns instant satellite demo presets with georeferenced overlays."""
     return [
         {
             "id": "delhi_temporal",
@@ -345,7 +502,7 @@ def get_imagery_presets():
             "resolution": "10.0m GSD",
             "area_sq_km": 124.5,
             "t1_image_url": "/static/prev_east_delhi_2018_S2.png",
-            "t2_image_url": "/static/prev_delhi_20260112_S2.png"
+            "t2_image_url": "/static/prev_delhi_20260112_S2.png",
         },
         {
             "id": "delhi_s2",
@@ -358,13 +515,13 @@ def get_imagery_presets():
             "crs": "EPSG:32643 (UTM 43N)",
             "resolution": "10.0m GSD",
             "area_sq_km": 1050.4,
-            "t1_image_url": "/static/delhi_preview.png"
+            "t1_image_url": "/static/prev_delhi_20260112_S2.png",
         },
         {
             "id": "bengaluru_urban_pair",
-            "name": "Bengaluru_Urban_Corridor_T1_T2.tif",
-            "displayName": "Bengaluru Urban Corridor (Bi-Temporal T1/T2)",
-            "sensor": "Optical (Sentinel-2)",
+            "name": "bengaluru_urban_2022_2024.tif",
+            "displayName": "Bengaluru Urban (2022 / 2024 Expansion)",
+            "sensor": "Sentinel-2 (Optical Multi-Temporal)",
             "mode": "bi-temporal",
             "wgs84_bounds": [77.618, 13.022, 77.652, 13.048],
             "center": [77.635, 13.035],
@@ -372,20 +529,20 @@ def get_imagery_presets():
             "resolution": "10.0m GSD",
             "area_sq_km": 10.5,
             "t1_image_url": "/static/Bengaluru_T1_Pre.png",
-            "t2_image_url": "/static/Bengaluru_T2_Post.png"
+            "t2_image_url": "/static/Bengaluru_T2_Post.png",
         },
         {
             "id": "mangalore_sar",
-            "name": "Mangalore_Harbor_SAR_VV.tif",
-            "displayName": "Mangalore Port (RISAT-1A / EOS-04 SAR)",
-            "sensor": "SAR (RISAT-1A / EOS-04)",
+            "name": "mangalore_sar_surface_water.tif",
+            "displayName": "Mangalore Coast (Sentinel-1 SAR C-Band)",
+            "sensor": "Sentinel-1 GRD (SAR)",
             "mode": "single",
-            "wgs84_bounds": [74.780, 12.850, 74.880, 12.950],
-            "center": [74.830, 12.900],
+            "wgs84_bounds": [74.792, 12.825, 74.912, 12.965],
+            "center": [74.852, 12.895],
             "crs": "EPSG:4326 (WGS84)",
-            "resolution": "2.0m GSD (FRS Mode)",
+            "resolution": "10.0m GSD",
             "area_sq_km": 118.2,
-            "t1_image_url": "/static/Mangalore_SAR_VV.png"
+            "t1_image_url": "/static/Mangalore_SAR_VV.png",
         },
         {
             "id": "cartosat_ahmedabad",
@@ -398,9 +555,7 @@ def get_imagery_presets():
             "crs": "EPSG:32643 (UTM 43N)",
             "resolution": "0.28m GSD",
             "area_sq_km": 15.6,
-            "t1_image_url": "/static/Bengaluru_T1_Pre.png" 
-        }
+            "t1_image_url": "/static/Bengaluru_T1_Pre.png",
+        },
     ]
-
-
 
