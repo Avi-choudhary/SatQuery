@@ -27,3 +27,8 @@ class SatQueryResponse(BaseModel):
         default=None,
         description="Persisted conversation ID for this turn.",
     )
+
+    band_contract: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description="Authoritative band capability contract for loaded imagery.",
+    )

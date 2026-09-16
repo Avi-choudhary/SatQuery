@@ -4,6 +4,7 @@ import { AlertTriangle, Radar, RotateCw, Terminal } from 'lucide-react';
 import { Badge } from '../ui/Badge';
 import { ThinkingDots } from '../ui/Feedback';
 import { EvidenceCard } from './EvidenceCard';
+import { MarkdownContent } from './MarkdownContent';
 import { useApp } from '../../context/AppState';
 import { formatClock, formatDuration } from '../../lib/trace';
 import type { ChatMessage } from '../../lib/types';
@@ -60,14 +61,7 @@ const AssistantMessage: React.FC<{ message: ChatMessage }> = ({ message }) => {
           </div>
         ) : (
           <>
-            <div
-              className={cn(
-                'whitespace-pre-wrap text-[14px] leading-[1.65]',
-                isError ? 'text-danger' : 'text-ink'
-              )}
-            >
-              {message.content}
-            </div>
+            <MarkdownContent content={message.content} isError={isError} />
 
             {isError && message.errorDetail && (
               <p className="mt-2 rounded-lg border border-danger/25 bg-danger/10 px-3 py-2 font-mono text-[11px] leading-relaxed text-ink-muted">

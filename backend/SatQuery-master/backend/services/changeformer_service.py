@@ -21,18 +21,10 @@ BACKEND_DIR = Path(__file__).resolve().parents[1]
 candidate_cf_dirs = [
     BACKEND_DIR / "external" / "ChangeFormer",
     BACKEND_DIR.parents[2] / "Bi-Temporal ChangeFormer" / "SatqueryAI" / "backend" / "external" / "ChangeFormer",
+    BACKEND_DIR.parents[1] / "Bi-Temporal ChangeFormer" / "SatqueryAI" / "backend" / "external" / "ChangeFormer",
+    BACKEND_DIR.parents[2] / "backend" / "external" / "ChangeFormer",
     Path("/Users/divyatewari/Desktop/SatqueryAI/backend/external/ChangeFormer"),
 ]
-CHANGEFORMER_DIR = candidate_cf_dirs[0]
-for _cdir in candidate_cf_dirs:
-    if _cdir.exists():
-        CHANGEFORMER_DIR = _cdir
-        break
-
-CHECKPOINT_ROOT = (
-    CHANGEFORMER_DIR
-    / "checkpoints"
-)
 
 PROJECT_NAME = (
     "CD_ChangeFormerV6_LEVIR_b16_lr0.0001_adamw_train_test_200_"
@@ -41,6 +33,22 @@ PROJECT_NAME = (
 )
 
 CHECKPOINT_NAME = "best_ckpt.pt"
+
+CHANGEFORMER_DIR = candidate_cf_dirs[0]
+for _cdir in candidate_cf_dirs:
+    if (_cdir / "checkpoints" / PROJECT_NAME / CHECKPOINT_NAME).exists():
+        CHANGEFORMER_DIR = _cdir
+        break
+else:
+    for _cdir in candidate_cf_dirs:
+        if _cdir.exists():
+            CHANGEFORMER_DIR = _cdir
+            break
+
+CHECKPOINT_ROOT = (
+    CHANGEFORMER_DIR
+    / "checkpoints"
+)
 
 IMG_SIZE = 256
 
@@ -570,6 +578,11 @@ def run_changeformer_arrays(
     """
 
     _check_changeformer_environment()
+
+    print(
+        f"[ChangeFormer] run_changeformer_arrays invoked: "
+        f"T1 shape={first_data.shape}, T2 shape={second_data.shape}, valid shape={valid.shape}"
+    )
 
     first_data = np.asarray(
         first_data,

@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect, useCallback } from 'react';
+import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import * as maplibregl from 'maplibre-gl';
 import 'maplibre-gl/dist/maplibre-gl.css';
 import {
@@ -313,6 +313,92 @@ export const MapViewport: React.FC<MapViewportProps> = ({
   const [isOverlayVisible, setIsOverlayVisible] = useState<boolean>(true);
   const [showColorLegend, setShowColorLegend] = useState<boolean>(false);
 
+  // Authoritative NIR capability assessment based on current temporalMode and loaded imagery
+  const nirCapability = useMemo(() => {
+    if (!activeOverlay) {
+      return {
+        available: false,
+        reason: 'No imagery loaded',
+        t1Available: false,
+        t2Available: false,
+        jointAvailable: false,
+        asymmetricNote: undefined as string | undefined,
+      };
+    }
+
+    const t1HasNir = Boolean(
+      activeOverlay.bandContract?.t1?.can_false_color_nir ||
+      activeOverlay.bandContract?.capabilities?.t1_false_color_nir ||
+      activeOverlay.t1NirImageUrl
+    );
+    const t2HasNir = Boolean(
+      activeOverlay.bandContract?.t2?.can_false_color_nir ||
+      activeOverlay.bandContract?.capabilities?.t2_false_color_nir ||
+      activeOverlay.t2NirImageUrl
+    );
+    const jointAvailable = Boolean(
+      activeOverlay.bandContract?.joint?.common_nir ||
+      activeOverlay.bandContract?.capabilities?.joint_false_color_nir
+    );
+
+    if (activeOverlay.mode === 'single') {
+      return {
+        available: t1HasNir,
+        reason: t1HasNir ? 'Available (NIR band detected)' : 'Unavailable: NIR band absent',
+        t1Available: t1HasNir,
+        t2Available: false,
+        jointAvailable: false,
+        asymmetricNote: undefined as string | undefined,
+      };
+    }
+
+    if (temporalMode === 't1') {
+      return {
+        available: t1HasNir,
+        reason: t1HasNir ? 'Available (T1 NIR band B8)' : 'Unavailable: NIR absent in T1',
+        t1Available: t1HasNir,
+        t2Available: t2HasNir,
+        jointAvailable,
+        asymmetricNote: undefined as string | undefined,
+      };
+    }
+
+    if (temporalMode === 't2') {
+      return {
+        available: t2HasNir,
+        reason: t2HasNir ? 'Available (T2 NIR band)' : 'Unavailable: NIR absent in T2',
+        t1Available: t1HasNir,
+        t2Available: t2HasNir,
+        jointAvailable,
+        asymmetricNote: undefined as string | undefined,
+      };
+    }
+
+    // swipe or fade:
+    const eitherHasNir = t1HasNir || t2HasNir;
+    return {
+      available: eitherHasNir,
+      reason: jointAvailable
+        ? 'Available across both dates'
+        : t1HasNir && !t2HasNir
+        ? 'T1 NIR available (T2 rendered in True Colour)'
+        : !t1HasNir && t2HasNir
+        ? 'T2 NIR available (T1 rendered in True Colour)'
+        : 'Unavailable: NIR absent in both dates',
+      t1Available: t1HasNir,
+      t2Available: t2HasNir,
+      jointAvailable,
+      asymmetricNote: t1HasNir && !t2HasNir ? 'Bi-temporal comparison note: T2 lacks NIR band' : undefined,
+    };
+  }, [activeOverlay, temporalMode]);
+
+  // When temporal display mode changes to T2, if T2 lacks NIR, safely fallback to true-colour
+  useEffect(() => {
+    if (temporalMode === 't2' && bandPreset === 'false-color-nir' && !nirCapability.available) {
+      setBandPreset('true-color');
+    }
+  }, [temporalMode, bandPreset, nirCapability.available]);
+
   // HUD & UI Tools
   const [showReticle, setShowReticle] = useState<boolean>(false);
   const [showBoundingBoxes, setShowBoundingBoxes] = useState<boolean>(true);
@@ -439,7 +525,8 @@ export const MapViewport: React.FC<MapViewportProps> = ({
     opacity: number,
     mode: TemporalModeType,
     sliderVal: number,
-    visible: boolean = true
+    visible: boolean = true,
+    filterPreset: BandFilterType = 'true-color'
   ) => {
     if (!ov || !ov.bounds || ov.bounds.length < 4) {
       // Clean up all overlay layers and sources safely
@@ -485,13 +572,20 @@ export const MapViewport: React.FC<MapViewportProps> = ({
     // Determine insertion position (below AI detection polygons so boxes stay on top)
     const beforeLayerId = map.getLayer('satquery-fill') ? 'satquery-fill' : undefined;
 
+    // Check NIR capabilities for genuine raster selection
+    const isT1Nir = filterPreset === 'false-color-nir' && Boolean(ov.bandContract?.t1?.can_false_color_nir || ov.t1NirImageUrl);
+    const targetT1Url = (isT1Nir && ov.t1NirImageUrl) ? ov.t1NirImageUrl : ov.t1ImageUrl;
+
+    const isT2Nir = filterPreset === 'false-color-nir' && Boolean(ov.bandContract?.t2?.can_false_color_nir || ov.t2NirImageUrl);
+    const targetT2Url = (isT2Nir && ov.t2NirImageUrl) ? ov.t2NirImageUrl : (ov.t2ImageUrl || '');
+
     // 1. Add or Update T1 Raster Source & Layer
-    if (ov.t1ImageUrl) {
+    if (targetT1Url) {
       try {
         const existingT1 = map.getSource('sentinel-raster-t1') as maplibregl.ImageSource | undefined;
         if (existingT1 && typeof existingT1.updateImage === 'function') {
           existingT1.updateImage({
-            url: ov.t1ImageUrl,
+            url: targetT1Url,
             coordinates: imageCoordinates
           });
           if (map.getLayer('sentinel-raster-layer-t1')) {
@@ -504,7 +598,7 @@ export const MapViewport: React.FC<MapViewportProps> = ({
 
           map.addSource('sentinel-raster-t1', {
             type: 'image',
-            url: ov.t1ImageUrl,
+            url: targetT1Url,
             coordinates: imageCoordinates
           });
           map.addLayer(
@@ -532,12 +626,12 @@ export const MapViewport: React.FC<MapViewportProps> = ({
     }
 
     // 2. Add or Update T2 Raster Source & Layer if bi-temporal
-    if (ov.mode === 'bi-temporal' && ov.t2ImageUrl) {
+    if (ov.mode === 'bi-temporal' && targetT2Url) {
       try {
         const existingT2 = map.getSource('sentinel-raster-t2') as maplibregl.ImageSource | undefined;
         if (existingT2 && typeof existingT2.updateImage === 'function') {
           existingT2.updateImage({
-            url: ov.t2ImageUrl,
+            url: targetT2Url,
             coordinates: imageCoordinates
           });
           if (map.getLayer('sentinel-raster-layer-t2')) {
@@ -550,7 +644,7 @@ export const MapViewport: React.FC<MapViewportProps> = ({
 
           map.addSource('sentinel-raster-t2', {
             type: 'image',
-            url: ov.t2ImageUrl,
+            url: targetT2Url,
             coordinates: imageCoordinates
           });
           map.addLayer(
@@ -880,7 +974,7 @@ export const MapViewport: React.FC<MapViewportProps> = ({
 
       ensureDetectionLayers(map, null);
       if (activeOverlay) {
-        updateOverlayLayers(map, activeOverlay, overlayOpacity, temporalMode, temporalSlider, isOverlayVisible);
+        updateOverlayLayers(map, activeOverlay, overlayOpacity, temporalMode, temporalSlider, isOverlayVisible, bandPreset);
       }
     });
 
@@ -910,7 +1004,7 @@ export const MapViewport: React.FC<MapViewportProps> = ({
     if (!map || !activeOverlay || !activeOverlay.bounds) return;
 
     const applyOverlay = () => {
-      updateOverlayLayers(map, activeOverlay, overlayOpacity, temporalMode, temporalSlider, isOverlayVisible);
+      updateOverlayLayers(map, activeOverlay, overlayOpacity, temporalMode, temporalSlider, isOverlayVisible, bandPreset);
 
       // Smooth camera glide to georeferenced bounding box
       const [minLng, minLat, maxLng, maxLat] = activeOverlay.bounds;
@@ -936,7 +1030,7 @@ export const MapViewport: React.FC<MapViewportProps> = ({
     } else {
       map.once('load', applyOverlay);
     }
-  }, [activeOverlay, updateOverlayLayers, isOverlayVisible]);
+  }, [activeOverlay, updateOverlayLayers, isOverlayVisible, bandPreset]);
 
   // 3. React to opacity, visibility, or temporal slider adjustments
   useEffect(() => {
@@ -980,6 +1074,13 @@ export const MapViewport: React.FC<MapViewportProps> = ({
       map.setPaintProperty('sentinel-bbox-line', 'line-opacity', isVisible ? 0.95 * overlayOpacity : 0);
     }
   }, [overlayOpacity, isOverlayVisible, temporalSlider, temporalMode, activeOverlay]);
+
+  // 3b. React to band preset changes (swapping genuine NIR raster overlay vs True Colour)
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !activeOverlay || !map.isStyleLoaded()) return;
+    updateOverlayLayers(map, activeOverlay, overlayOpacity, temporalMode, temporalSlider, isOverlayVisible, bandPreset);
+  }, [bandPreset, activeOverlay, overlayOpacity, temporalMode, temporalSlider, isOverlayVisible, updateOverlayLayers]);
 
   // 4. React to dynamic GeoJSON detections from AI inference queries
   useEffect(() => {
@@ -1220,7 +1321,7 @@ export const MapViewport: React.FC<MapViewportProps> = ({
         }
         ensureDetectionLayers(map, geoJsonData);
         if (activeOverlay) {
-          updateOverlayLayers(map, activeOverlay, overlayOpacity, temporalMode, temporalSlider, isOverlayVisible);
+          updateOverlayLayers(map, activeOverlay, overlayOpacity, temporalMode, temporalSlider, isOverlayVisible, bandPreset);
         }
       } catch (err) {
         console.warn('Post-style.load reattachment notice:', err);
@@ -1447,7 +1548,8 @@ export const MapViewport: React.FC<MapViewportProps> = ({
   const getBandFilterStyle = (): React.CSSProperties => {
     switch (bandPreset) {
       case 'false-color-nir':
-        return { filter: 'hue-rotate(130deg) saturate(240%) contrast(120%)' };
+        // Genuine NIR raster overlay is swapped directly on the MapLibre layer. No fake CSS hue rotation.
+        return {};
       case 'sar-contrast':
         return { filter: 'contrast(190%) brightness(115%) grayscale(70%)' };
       case 'edge-boost':
@@ -1611,21 +1713,46 @@ export const MapViewport: React.FC<MapViewportProps> = ({
 
               <p className="label-caps mb-2 mt-3.5 text-ink-faint">Band rendering</p>
               <div className="space-y-0.5">
-                {BAND_PRESETS.map((preset) => (
-                  <button
-                    key={preset.value}
-                    type="button"
-                    onClick={() => setBandPreset(preset.value)}
-                    className={`flex w-full cursor-pointer items-center justify-between rounded-md px-2 py-1.5 text-left text-[11.5px] transition-colors ${
-                      bandPreset === preset.value
-                        ? 'bg-accent/15 text-accent'
-                        : 'text-ink-muted hover:bg-surface-3 hover:text-ink'
-                    }`}
-                  >
-                    {preset.label}
-                    {bandPreset === preset.value && <Check size={11} aria-hidden />}
-                  </button>
-                ))}
+                {BAND_PRESETS.map((preset) => {
+                  const isNir = preset.value === 'false-color-nir';
+                  const isDisabled = isNir && !nirCapability.available;
+                  const isSelected = bandPreset === preset.value;
+
+                  return (
+                    <button
+                      key={preset.value}
+                      type="button"
+                      disabled={isDisabled}
+                      title={isNir && isDisabled ? nirCapability.reason : undefined}
+                      onClick={() => !isDisabled && setBandPreset(preset.value)}
+                      className={`flex w-full items-center justify-between rounded-md px-2 py-1.5 text-left text-[11.5px] transition-colors ${
+                        isDisabled
+                          ? 'cursor-not-allowed opacity-45 text-ink-faint'
+                          : 'cursor-pointer'
+                      } ${
+                        isSelected
+                          ? 'bg-accent/15 text-accent font-medium'
+                          : !isDisabled
+                          ? 'text-ink-muted hover:bg-surface-3 hover:text-ink'
+                          : ''
+                      }`}
+                    >
+                      <div className="flex flex-col min-w-0 pr-1">
+                        <span>{preset.label}</span>
+                        {isNir && (
+                          <span
+                            className={`text-[9.5px] font-mono leading-tight ${
+                              isDisabled ? 'text-amber-500/90' : 'text-emerald-500/90'
+                            }`}
+                          >
+                            {nirCapability.reason}
+                          </span>
+                        )}
+                      </div>
+                      {isSelected && <Check size={11} aria-hidden className="shrink-0" />}
+                    </button>
+                  );
+                })}
               </div>
               
               <p className="label-caps mb-2 mt-3.5 text-ink-faint">Bhuvan Thematic Overlays</p>
@@ -1928,6 +2055,44 @@ export const MapViewport: React.FC<MapViewportProps> = ({
                     <ArrowLeftRight size={11} className="shrink-0 text-accent" aria-hidden />
                   </div>
                 )}
+
+              {/* Authoritative Spectral Band & Index Capabilities */}
+              <div className="mt-2 flex flex-wrap items-center justify-between gap-1.5 border-t border-line/60 pt-1.5 text-[10px] font-mono">
+                <div className="flex items-center gap-1.5 text-ink-muted">
+                  <span
+                    className={`rounded px-1.5 py-0.5 ${
+                      nirCapability.t1Available
+                        ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20'
+                        : 'bg-surface-2 text-ink-faint border border-line'
+                    }`}
+                    title={nirCapability.t1Available ? 'T1 has Red, Green, Blue, NIR (B8)' : 'T1 lacks NIR band'}
+                  >
+                    T1: RGB ✓ | NIR {nirCapability.t1Available ? '✓' : '✗'} | NDVI {nirCapability.t1Available ? '✓' : '✗'}
+                  </span>
+                  {activeOverlay.mode === 'bi-temporal' && (
+                    <span
+                      className={`rounded px-1.5 py-0.5 ${
+                        nirCapability.t2Available
+                          ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20'
+                          : 'bg-amber-500/10 text-amber-400/90 border border-amber-500/20'
+                      }`}
+                      title={nirCapability.t2Available ? 'T2 contains RGB only; NIR band is absent' : 'T2 contains RGB only; NIR band is absent'}
+                    >
+                      T2: RGB ✓ | NIR {nirCapability.t2Available ? '✓' : '✗'} | NDVI {nirCapability.t2Available ? '✓' : '✗'}
+                    </span>
+                  )}
+                </div>
+                {activeOverlay.mode === 'bi-temporal' && !nirCapability.jointAvailable && (
+                  <span className="text-amber-400/90 text-[9.5px]">
+                    Bi-temporal ΔNDVI unavailable (T2 lacks NIR)
+                  </span>
+                )}
+                {activeOverlay.mode === 'bi-temporal' && nirCapability.asymmetricNote && (
+                  <span className="text-amber-400/80 text-[9.5px]">
+                    {nirCapability.asymmetricNote}
+                  </span>
+                )}
+              </div>
             </div>
           </div>
         )}

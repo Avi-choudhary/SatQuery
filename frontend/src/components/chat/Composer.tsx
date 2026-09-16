@@ -31,7 +31,11 @@ const SceneChip: React.FC = () => {
         className="max-w-[22rem] truncate text-xs text-ink-muted transition-colors hover:text-ink cursor-pointer"
         title={dataset.name}
       >
-        {dataset.name}
+        {dataset.t1Filename && dataset.t2Filename
+          ? `${dataset.t1Filename} + ${dataset.t2Filename}`
+          : dataset.name.includes(':::')
+          ? dataset.name.split(':::').join(' + ')
+          : dataset.name}
       </button>
       <button
         type="button"

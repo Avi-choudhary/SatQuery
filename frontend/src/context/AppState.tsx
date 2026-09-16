@@ -97,10 +97,27 @@ export function presetToOverlay(preset: ImageryPreset): SceneOverlay {
     areaSqKm: preset.area_sq_km,
     t1ImageUrl: resolveAssetUrl(preset.t1_image_url) ?? preset.t1_image_url,
     t2ImageUrl: resolveAssetUrl(preset.t2_image_url),
+    bandContract: preset.band_contract,
+    t1NirImageUrl: resolveAssetUrl(preset.t1_nir_image_url),
+    t2NirImageUrl: resolveAssetUrl(preset.t2_nir_image_url),
   };
 }
 
 export function presetToDataset(preset: ImageryPreset): SceneDataset {
+  let t1: string | undefined = undefined;
+  let t2: string | undefined = undefined;
+  if (preset.id === 'delhi_temporal') {
+    t1 = 'aligned_east_delhi_2018_S2.tif';
+    t2 = 'aligned_delhi_20260112_S2.tif';
+  } else if (preset.id === 'bengaluru_urban_pair') {
+    t1 = 'Bengaluru_T1_Pre.png';
+    t2 = 'Bengaluru_T2_Post.png';
+  } else if (preset.mode === 'bi-temporal' && preset.name.includes(':::')) {
+    const parts = preset.name.split(':::');
+    t1 = parts[0];
+    t2 = parts[1];
+  }
+
   return {
     // The backend resolves imagery by the on-disk filename, not the pretty
     // display name, so the dataset carries `name` verbatim.
@@ -113,6 +130,10 @@ export function presetToDataset(preset: ImageryPreset): SceneDataset {
     syncedWithBackend: true,
     georeferenced: true,
     areaSqKm: preset.area_sq_km,
+    datasetId: preset.id,
+    t1Filename: t1,
+    t2Filename: t2,
+    bandContract: preset.band_contract,
   };
 }
 
@@ -318,7 +339,9 @@ export const AppStateProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       setIsBusy(true);
 
       const startedAt = performance.now();
-      const filesToSend = dataset && !dataset.syncedWithBackend ? dataset.files ?? null : null;
+      const filesToSend = dataset?.files?.length ? dataset.files : null;
+      const beforeFile = dataset?.files && dataset.files.length >= 2 ? dataset.files[0] : null;
+      const afterFile = dataset?.files && dataset.files.length >= 2 ? dataset.files[1] : null;
 
       // Add instruction tag for the backend API based on active language
       const instruction =
@@ -332,7 +355,12 @@ export const AppStateProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         const response = await submitSatQuery({
           query: fullBackendQuery,
           files: filesToSend,
+          beforeFile,
+          afterFile,
           datasetName: dataset?.name ?? null,
+          t1Filename: dataset?.t1Filename ?? null,
+          t2Filename: dataset?.t2Filename ?? null,
+          datasetId: dataset?.datasetId ?? null,
           signal: controller.signal,
         });
 

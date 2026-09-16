@@ -6,8 +6,9 @@ from typing import List
 
 from core.tracer import Tracer
 from schemas.responses import SatQueryResponse
-from services import vqa_service, ground_service, change_service
+from services import vqa_service, ground_service, change_service, band_service
 from utils import gis_pipeline
+from utils.markdown_formatter import sanitize_markdown
 from core.query_planner import parse_query_plan
 
 
@@ -141,6 +142,11 @@ async def process_query(query: str, file_paths: List[str]) -> SatQueryResponse:
 
     tracer.append_log(f"Received query: '{clean_display_query}'")
     tracer.append_log(f"Received {file_count} input file(s) [{file_names}]")
+    if file_count >= 2:
+        tracer.append_log(f"Bi-temporal temporal ordering: T1 (earlier)='{os.path.basename(file_paths[0])}', T2 (later)='{os.path.basename(file_paths[1])}'")
+        print(f"[SatQuery Agent] Bi-temporal input verified: T1='{file_paths[0]}', T2='{file_paths[1]}'")
+    else:
+        print(f"[SatQuery Agent] Single/partial input received: {file_paths}")
 
     # Step 1: Query Planner
     plan = parse_query_plan(query)
@@ -149,7 +155,9 @@ async def process_query(query: str, file_paths: List[str]) -> SatQueryResponse:
     )
 
     # Step 2: Intent Classification & Routing
-    if _looks_like_change_query(query, file_count):
+    if plan.intent == "capability_inquiry" or plan.operation in ("index_capability", "inspect_bands") or plan.phenomenon == "band_availability":
+        task = "CAPABILITY_INQUIRY"
+    elif _looks_like_change_query(query, file_count):
         task = "CHANGE_DETECTION"
     elif _looks_like_coord_query(query) and file_count <= 1:
         task = "GEOSPATIAL_METADATA"
@@ -165,8 +173,10 @@ async def process_query(query: str, file_paths: List[str]) -> SatQueryResponse:
     if task == "CHANGE_DETECTION" and file_count >= 2:
         try:
             processed_paths = gis_pipeline.align_geotiffs(file_paths)
+            print(f"[SatQuery Agent] Co-registration result paths: {processed_paths}")
         except Exception as e:
             tracer.append_log(f"Co-registration skipped: {e}")
+            print(f"[SatQuery Agent] Co-registration skipped: {e}")
 
     visual_evidence = []
     text_answer = ""
@@ -245,6 +255,20 @@ async def process_query(query: str, file_paths: List[str]) -> SatQueryResponse:
                     )
                 tracer.append_log("step 3: file lacks embedded geospatial header tags")
 
+        elif task == "CAPABILITY_INQUIRY":
+            tracer.append_log("step 2: routed to Band Capability Specialist")
+            t1_p = file_paths[0] if file_paths else None
+            t2_p = file_paths[1] if len(file_paths) > 1 else None
+
+            if t1_p:
+                contract = band_service.build_band_capability_contract(t1_p, t2_p)
+                text_answer = band_service.format_band_contract_markdown(contract)
+                tracer.append_log(f"step 3: synthesized authoritative band capability report for {file_count} scene(s)")
+            else:
+                text_answer = (
+                    "Please upload at least one satellite raster (GeoTIFF) to inspect available spectral bands and analytical capabilities."
+                )
+
         elif task == "CHANGE_DETECTION":
             tracer.append_log("step 2: selecting Change Detective specialist")
             text_answer, visual_evidence = await change_service.run_inference(
@@ -278,6 +302,9 @@ async def process_query(query: str, file_paths: List[str]) -> SatQueryResponse:
         visual_evidence = []
 
     tracer.append_log("step 3: assembling structured SatQuery response")
+
+    # Ensure robust, valid GitHub-Flavored Markdown for web UI rendering
+    text_answer = sanitize_markdown(text_answer)
 
     trace_dict = tracer.get_trace()
     return SatQueryResponse(

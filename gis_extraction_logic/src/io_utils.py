@@ -38,18 +38,30 @@ def load_raster(path, bands=None):
     with rasterio.open(path) as src:
         array = src.read() if bands is None else src.read(bands)
         profile = src.profile.copy()   # metadata needed to save it back out later
+        profile["descriptions"] = src.descriptions
     return array, profile
 
 
-def save_raster(path, array, profile):
+def save_raster(path, array, profile, descriptions=None):
     """Write a numpy array back out as a proper georeferenced file."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     profile = profile.copy()
+    descs = descriptions or profile.pop("descriptions", None)
     profile.update(count=array.shape[0] if array.ndim == 3 else 1,
                     height=array.shape[-2], width=array.shape[-1], dtype=array.dtype)
     with rasterio.open(path, "w", **profile) as dst:
-        dst.write(array) if array.ndim == 3 else dst.write(array, 1)
+        if array.ndim == 3:
+            dst.write(array)
+        else:
+            dst.write(array, 1)
+        if descs:
+            for idx, d in enumerate(descs, 1):
+                if d and idx <= dst.count:
+                    try:
+                        dst.set_band_description(idx, str(d))
+                    except Exception:
+                        pass
 
 
 def list_tiffs(directory):

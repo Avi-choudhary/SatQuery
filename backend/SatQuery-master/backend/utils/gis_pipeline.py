@@ -175,9 +175,13 @@ def build_web_overlay(
                     dst_height=max(1, int(height * scale)),
                 )
 
-            # Band order follows this project's convention for its Sentinel-2
-            # products: band 1 = red (B4), 2 = green (B3), 3 = blue (B2).
-            band_indexes = [1, 2, 3] if src.count >= 3 else [1, 1, 1]
+            from services.band_service import detect_raster_bands
+
+            band_info = detect_raster_bands(src)
+            r_idx = band_info["red_band_index"] or 1
+            g_idx = band_info["green_band_index"] or (2 if src.count >= 2 else 1)
+            b_idx = band_info["blue_band_index"] or (3 if src.count >= 3 else 1)
+            band_indexes = [r_idx, g_idx, b_idx]
 
             channels = []
             for index in band_indexes:
@@ -220,6 +224,37 @@ def build_web_overlay(
             png_path = target_dir / f"{suffix}_{Path(file_path).stem}.png"
             Image.fromarray(rgba, mode="RGBA").save(str(png_path), "PNG")
 
+            # If NIR band exists, render genuine scientific False-Colour NIR composite: [NIR, Red, Green]
+            png_nir_name = None
+            if band_info["has_nir"] and band_info["nir_band_index"]:
+                try:
+                    nir_idx = band_info["nir_band_index"]
+                    nir_indexes = [nir_idx, r_idx, g_idx]
+                    nir_channels = []
+                    for n_idx in nir_indexes:
+                        dst_n = np.zeros((height, width), dtype=np.float32)
+                        reproject(
+                            source=rasterio.band(src, n_idx),
+                            destination=dst_n,
+                            src_transform=src.transform,
+                            src_crs=src.crs,
+                            dst_transform=transform,
+                            dst_crs=WEB_MERCATOR,
+                            resampling=Resampling.bilinear,
+                            src_nodata=src.nodata,
+                            dst_nodata=np.nan,
+                        )
+                        nir_channels.append(dst_n)
+                    nir_rgba = np.zeros((height, width, 4), dtype=np.uint8)
+                    for i, nc in enumerate(nir_channels):
+                        nir_rgba[:, :, i] = _stretch_to_byte(nc, valid)
+                    nir_rgba[:, :, 3] = np.where(valid, 255, 0).astype(np.uint8)
+                    png_nir_path = target_dir / f"nir_{suffix}_{Path(file_path).stem}.png"
+                    Image.fromarray(nir_rgba, mode="RGBA").save(str(png_nir_path), "PNG")
+                    png_nir_name = png_nir_path.name
+                except Exception as n_err:
+                    print(f"[GIS Overlay NIR Warning]: {n_err}")
+
             # Corners of the warped extent. Because the image is axis-aligned in
             # 3857 and 3857 -> 4326 is separable, the lat/lon envelope of that
             # extent *is* the image's footprint, so MapLibre places it exactly.
@@ -230,6 +265,7 @@ def build_web_overlay(
             return {
                 "png_path": str(png_path),
                 "png_name": png_path.name,
+                "png_nir_name": png_nir_name,
                 "wgs84_bounds": [round(float(v), 8) for v in wgs84],
                 "mercator_bounds": [
                     float(left),
@@ -240,6 +276,7 @@ def build_web_overlay(
                 "width": int(width),
                 "height": int(height),
                 "source_crs": str(src.crs),
+                "band_info": band_info,
             }
 
     except Exception as exc:
@@ -330,6 +367,12 @@ def get_geotiff_info(file_path: str) -> Dict[str, Any]:
                 except Exception:
                     pass
 
+    try:
+        from services.band_service import detect_raster_bands
+        info["band_info"] = detect_raster_bands(file_path)
+    except Exception:
+        info["band_info"] = None
+
     return info
 
 
@@ -352,6 +395,15 @@ def align_geotiffs(file_paths: List[str]) -> List[str]:
     out_path_1 = str(TEMP_ALIGNED_DIR / f"aligned_{os.path.basename(file_1)}")
     out_path_2 = str(TEMP_ALIGNED_DIR / f"aligned_{os.path.basename(file_2)}")
 
+    if (
+        os.path.exists(out_path_1)
+        and os.path.exists(out_path_2)
+        and os.path.getmtime(out_path_1) >= os.path.getmtime(file_1)
+        and os.path.getmtime(out_path_2) >= os.path.getmtime(file_2)
+    ):
+        print(f"[GIS Pipeline] Using cached aligned rasters: '{os.path.basename(out_path_1)}' & '{os.path.basename(out_path_2)}'")
+        return [out_path_1, out_path_2]
+
     try:
         from src.coregistration import coregister_pair
         from src.io_utils import load_raster, save_raster
@@ -362,8 +414,8 @@ def align_geotiffs(file_paths: List[str]) -> List[str]:
 
         aligned_1, aligned_2, shared_profile = coregister_pair(arr1, prof1, arr2, prof2)
 
-        save_raster(out_path_1, aligned_1, shared_profile)
-        save_raster(out_path_2, aligned_2, shared_profile)
+        save_raster(out_path_1, aligned_1, shared_profile, descriptions=prof1.get("descriptions"))
+        save_raster(out_path_2, aligned_2, shared_profile, descriptions=prof2.get("descriptions"))
         print(f"[GIS Pipeline] Co-registration successful! Aligned grid: {shared_profile.get('crs')}")
         return [out_path_1, out_path_2]
 

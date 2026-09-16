@@ -28,6 +28,42 @@ export interface TraceStep {
   confidence?: number;
 }
 
+export interface BandCapabilityInfo {
+  filename?: string;
+  bands_count?: number;
+  descriptions?: (string | null)[];
+  has_nir?: boolean;
+  nir_band_index?: number;
+  has_red?: boolean;
+  red_band_index?: number;
+  has_green?: boolean;
+  has_blue?: boolean;
+  can_false_color_nir?: boolean;
+  can_ndvi?: boolean;
+}
+
+export interface BandCapabilityContract {
+  t1?: BandCapabilityInfo;
+  t2?: BandCapabilityInfo | null;
+  joint?: {
+    common_nir?: boolean;
+    common_ndvi?: boolean;
+    can_delta_ndvi?: boolean;
+    reason?: string;
+  };
+  capabilities?: {
+    t1_false_color_nir?: boolean;
+    t2_false_color_nir?: boolean;
+    joint_false_color_nir?: boolean;
+    joint_delta_ndvi?: boolean;
+  };
+  indicators?: {
+    t1?: string;
+    t2?: string;
+    comparison_note?: string;
+  };
+}
+
 export interface SceneOverlay {
   datasetId?: string;
   name: string;
@@ -44,6 +80,9 @@ export interface SceneOverlay {
   t2ImageUrl?: string | null;
   t1Filename?: string;
   t2Filename?: string | null;
+  bandContract?: BandCapabilityContract;
+  t1NirImageUrl?: string | null;
+  t2NirImageUrl?: string | null;
 }
 
 export interface SceneDataset {
@@ -63,6 +102,10 @@ export interface SceneDataset {
    * map at all, and the UI must say so rather than guess a location.
    */
   georeferenced: boolean;
+  datasetId?: string;
+  t1Filename?: string;
+  t2Filename?: string | null;
+  bandContract?: BandCapabilityContract;
 }
 
 export type MessageRole = 'user' | 'assistant';

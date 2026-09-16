@@ -62,7 +62,7 @@ export const ScenePanel: React.FC = () => {
     // those wait for the server-rendered RGB thumbnail.
     const isTiff = /\.tiff?$/i.test(files[0].name);
     const provisional: SceneDataset = {
-      name: files[0].name,
+      name: files.length > 1 ? `${files[0].name}:::${files[1].name}` : files[0].name,
       sizeLabel: formatBytes(files.reduce((sum, f) => sum + f.size, 0)),
       sensor: 'Pending ingest',
       mode: files.length > 1 ? 'bi-temporal' : 'single',
@@ -71,6 +71,8 @@ export const ScenePanel: React.FC = () => {
       files,
       syncedWithBackend: false,
       georeferenced: false,
+      t1Filename: files[0].name,
+      t2Filename: files[1]?.name,
     };
     setScene(provisional, isTiff ? null : buildLocalOverlay(files));
 
@@ -101,6 +103,10 @@ export const ScenePanel: React.FC = () => {
           syncedWithBackend: true,
           georeferenced: placeable,
           areaSqKm: response.area_sq_km,
+          datasetId: response.dataset_id,
+          t1Filename: response.t1_filename || files[0].name,
+          t2Filename: response.t2_filename || files[1]?.name,
+          bandContract: response.band_contract,
         },
         placeable
           ? {
@@ -117,6 +123,9 @@ export const ScenePanel: React.FC = () => {
               t2ImageUrl: resolveAssetUrl(response.t2_image_url),
               t1Filename: response.t1_filename,
               t2Filename: response.t2_filename,
+              bandContract: response.band_contract,
+              t1NirImageUrl: resolveAssetUrl(response.t1_nir_image_url),
+              t2NirImageUrl: resolveAssetUrl(response.t2_nir_image_url),
             }
           : null
       );
@@ -202,7 +211,11 @@ export const ScenePanel: React.FC = () => {
             <div className="flex min-w-0 items-center gap-2">
               <FileImage size={15} className="shrink-0 text-accent" aria-hidden />
               <span className="truncate font-mono text-[11.5px] text-ink" title={dataset.name}>
-                {dataset.name}
+                {dataset.t1Filename && dataset.t2Filename
+                  ? `${dataset.t1Filename} + ${dataset.t2Filename}`
+                  : dataset.name.includes(':::')
+                  ? dataset.name.split(':::').join(' + ')
+                  : dataset.name}
               </span>
             </div>
             <button

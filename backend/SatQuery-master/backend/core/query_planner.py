@@ -84,7 +84,7 @@ def parse_query_plan(query: str) -> QueryPlan:
         )
 
     alone_index = re.search(r"\b(ndvi|ndwi|ndbi)\b", ql)
-    if alone_index and any(w in ql for w in ("can", "calculate", "compute", "value", "formula")):
+    if alone_index and any(w in ql for w in ("can", "calculate", "compute", "value", "formula", "available", "is")):
         idx_name = alone_index.group(1).lower()
         return QueryPlan(
             raw_query=q,
@@ -94,6 +94,78 @@ def parse_query_plan(query: str) -> QueryPlan:
             requested_output="capability_explanation",
             target_concept=f"{idx_name.upper()} spectral index",
             specific_index=idx_name,
+        )
+
+    # Inquiries about spectral bands and NIR presence
+    # (e.g. "Which spectral bands are available in T1 and T2?", "What bands are available?", "Is NIR available in these images?")
+    band_inquiry = bool(
+        re.search(r"\b(which|what|list|show|check|available|present)\s+(?:spectral\s+)?bands?\b", ql)
+        or re.search(r"\bbands?\s+(?:are\s+)?(?:available|present|in\s+t1|in\s+t2)\b", ql)
+        or re.search(r"\b(is|are|does\s+it\s+have|do\s+we\s+have|check)\s+(?:the\s+)?(nir|near[- ]infrared|swir)\b", ql)
+        or ("nir" in ql and any(w in ql for w in ("available", "present", "missing", "band", "exist")))
+    )
+    if band_inquiry:
+        idx_target = "ndbi" if "swir" in ql else "ndvi"
+        return QueryPlan(
+            raw_query=q,
+            intent="capability_inquiry",
+            phenomenon="band_availability" if ("which" in ql or "what" in ql or "list" in ql or "bands" in ql) else "specific_index",
+            operation="index_capability",
+            requested_output="capability_explanation",
+            target_concept=f"Band availability and {idx_target.upper()} capability",
+            specific_index=idx_target,
+        )
+
+    # Confirmation inquiries (e.g. "Can you definitively confirm that the 39.85 hectares were converted from vegetation to built-up structures? Explain what evidence supports your conclusion.")
+    is_confirmation_query = bool(
+        _match_regex(ql, r"\b(can\s+you\s+(?:definitively\s+|strictly\s+|actually\s+)?confirm|definitively\s+confirm|is\s+it\s+(?:definitively\s+)?confirmed|confirmation\s+of|can\s+we\s+confirm|prove\s+that)\b")
+    )
+    if is_confirmation_query and (("built" in ql or "urban" in ql or "conversion" in ql or "convert" in ql or "transition" in ql) or ("vegetat" in ql or "39.85" in ql or "hectare" in ql)):
+        return QueryPlan(
+            raw_query=q,
+            intent="transition_confirmation",
+            phenomenon="transition_confirmation",
+            operation="evaluate_confirmation",
+            requested_output="confirmation_evaluation",
+            target_concept="definitive confirmation of vegetation to built-up transition",
+        )
+
+    # Land-cover transition detection (e.g. vegetation/open-land -> built-up)
+    is_veg_built_query = bool(
+        _match_regex(ql, r"\b(transition|convert(?:ed|ion)?|changed\s+(?:from|to)|bec[ao]me|shift\s+(?:from|to)|turn(?:ed)?\s+into)\b")
+        or "vegetation to built" in ql
+        or "vegetation/open-land to built" in ql
+        or "open-land to built" in ql
+        or "open land to built" in ql
+        or "open land changed to built" in ql
+        or "from vegetation" in ql
+        or "to built-up" in ql
+        or "to built" in ql
+    ) and (("vegetat" in ql or "green" in ql or "open land" in ql or "open-land" in ql) and ("built" in ql or "urban" in ql or "construct" in ql))
+
+    if is_veg_built_query:
+        # Extract top_k if present
+        top_k_val = None
+        tk_match = re.search(r"\b(?:top|first|show(?:\s+the)?)\s+(\d+|one|two|three|four|five|six|seven|eight|nine|ten)\b", ql)
+        if not tk_match:
+            tk_match = re.search(r"\b(?:the\s+)?(\d+|one|two|three|four|five|six|seven|eight|nine|ten)\s+(?:candidate|largest|biggest|most\s*significant|top|greatest|prominent)\b", ql)
+        if tk_match:
+            val_str = tk_match.group(1)
+            words_to_num = {
+                "one": 1, "two": 2, "three": 3, "four": 4, "five": 5,
+                "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10,
+            }
+            top_k_val = words_to_num.get(val_str, int(val_str) if val_str.isdigit() else None)
+
+        return QueryPlan(
+            raw_query=q,
+            intent="transition_inquiry",
+            phenomenon="transition_veg_to_built",
+            operation="detect_transition",
+            requested_output="candidate_transition_analysis",
+            target_concept="candidate vegetation to built-up transition",
+            direction_filter="transition",
+            top_k=top_k_val,
         )
 
     if _match_regex(ql, r"\b(what\s*evidence|evidence\s*supports|how\s*do\s*you\s*know|evidence\s*quality|diagnostics|quality\s*factors)\b"):
@@ -116,6 +188,17 @@ def parse_query_plan(query: str) -> QueryPlan:
             target_concept="causal attribution and plausible change mechanisms",
         )
 
+    # Unchanged / stability detection
+    if _match_regex(ql, r"\b(unchanged|remained\s*unchanged|no\s*change|stable|stability|persisted|did\s*not\s*change|non-?changed)\b"):
+        return QueryPlan(
+            raw_query=q,
+            intent="stability_inquiry",
+            phenomenon="unchanged",
+            operation="quantify_stable_footprint",
+            requested_output="stable_area_summary",
+            target_concept="unperturbed and stable landscape footprint",
+        )
+
     direction = None
     if _match_regex(ql, r"\b(increase\s*or\s*decrease|gain\s*or\s*loss|expand\s*or\s*contract|expansion\s*or\s*reduction)\b"):
         direction = "both"
@@ -126,6 +209,9 @@ def parse_query_plan(query: str) -> QueryPlan:
 
     top_k = None
     top_k_match = re.search(r"\b(?:top|first|show(?:\s+the)?)\s+(\d+|one|two|three|four|five|six|seven|eight|nine|ten)\b", ql)
+    if not top_k_match:
+        top_k_match = re.search(r"\b(?:the\s+)?(\d+|one|two|three|four|five|six|seven|eight|nine|ten)\s+(?:largest|biggest|most\s*significant|top|greatest|prominent)\b", ql)
+
     words_to_num = {
         "one": 1, "two": 2, "three": 3, "four": 4, "five": 5,
         "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10,
@@ -142,7 +228,11 @@ def parse_query_plan(query: str) -> QueryPlan:
 
     is_explicit_ranking = bool(
         top_k is not None
-        or _match_regex(ql, r"\b(which\s*(?:areas?|regions?)\s*changed\s*the\s*most|largest\s*changed|biggest\s*changed|greatest\s*changed|largest\s*region|largest\s*change)\b")
+        or _match_regex(ql, r"\b(which\s*(?:areas?|regions?|clusters?|zones?)\s*(?:experienced|had|underwent|show(?:ed)?|saw)\s*(?:the\s*)?(?:most|greatest|highest|largest)?\s*(?:significant\s*)?changes?)\b")
+        or _match_regex(ql, r"\b(which\s*(?:areas?|regions?|clusters?|zones?)\s*changed\s*(?:the\s*)?most|largest\s*changed|biggest\s*changed|greatest\s*changed|largest\s*region|largest\s*change)\b")
+        or _match_regex(ql, r"\b(where\s*(?:are|were)\s*(?:the\s*)?(?:most|greatest|highest|largest)\s*changes?)\b")
+        or _match_regex(ql, r"\b(most\s*significant\s*changes?|greatest\s*changes?|most\s*changed|highest\s*change\s*magnitude|rank\s*(?:the\s*)?(?:changes?|clusters?|regions?))\b")
+        or _match_regex(ql, r"\b(rank(?:ing)?|ranked\s*(?:areas?|regions?|clusters?))\b")
     )
 
     if is_explicit_ranking:
@@ -274,6 +364,19 @@ def parse_query_plan(query: str) -> QueryPlan:
             requested_output="direction_area_location",
             target_concept="surface darkening",
             direction_filter="decrease",
+        )
+
+    if _match_regex(ql, r"\b(compare\s+(?:the\s+|these\s+)?(?:two\s+)?(?:earlier|before|t1|satellite|images?|scenes?)|major\s*land-?use\s*changes?|what\s*changed\s+between|overview\s+of\s+changes?|summary\s+of\s+changes?|landscape\s*changes?|table\s+(?:summarizing|of)?\s*(?:the\s+)?major|major\s*changes?)\b"):
+        return QueryPlan(
+            raw_query=q,
+            intent="change_inquiry",
+            phenomenon="land_use_comparison",
+            operation="compare_and_summarize",
+            requested_output="overall_landscape_summary",
+            target_concept="overall multi-temporal land-use comparison",
+            direction_filter=direction,
+            top_k=top_k,
+            sort_by=sort_by,
         )
 
     return QueryPlan(

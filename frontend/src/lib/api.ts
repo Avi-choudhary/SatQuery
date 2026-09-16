@@ -16,7 +16,7 @@
  * to point at a different host (e.g. a tunnelled GPU box).
  */
 
-import type { ImageOverlayEvidence } from './types';
+import type { BandCapabilityContract, ImageOverlayEvidence } from './types';
 
 const RAW_BASE = (import.meta.env.VITE_API_BASE_URL ?? '/api/v1').trim();
 
@@ -218,6 +218,11 @@ export interface SubmitQueryArgs {
   query: string;
   files?: File[] | null;
   datasetName?: string | null;
+  t1Filename?: string | null;
+  t2Filename?: string | null;
+  datasetId?: string | null;
+  beforeFile?: File | null;
+  afterFile?: File | null;
   signal?: AbortSignal;
 }
 
@@ -228,14 +233,45 @@ export interface SubmitQueryArgs {
 const QUERY_TIMEOUT_MS = 10 * 60000;
 
 export async function submitSatQuery(args: SubmitQueryArgs): Promise<SatQueryResponse> {
-  const { query, files, datasetName, signal } = args;
+  const {
+    query,
+    files,
+    datasetName,
+    t1Filename,
+    t2Filename,
+    datasetId,
+    beforeFile,
+    afterFile,
+    signal,
+  } = args;
   const form = new FormData();
   form.append('query', query);
 
-  // The backend re-resolves imagery from dataset_name when no bytes are sent,
-  // so re-uploading an unchanged scene on every turn is pure waste.
-  (files ?? []).forEach((file) => form.append('files', file));
+  if (beforeFile) form.append('before_file', beforeFile);
+  if (afterFile) form.append('after_file', afterFile);
+
+  const fileArray = files ?? [];
+  fileArray.forEach((file, idx) => {
+    form.append('files', file);
+    if (fileArray.length >= 2) {
+      if (idx === 0 && !beforeFile) form.append('before_file', file);
+      if (idx === 1 && !afterFile) form.append('after_file', file);
+    }
+  });
+
   if (datasetName) form.append('dataset_name', datasetName);
+  if (t1Filename) form.append('t1_filename', t1Filename);
+  if (t2Filename) form.append('t2_filename', t2Filename);
+  if (datasetId) form.append('dataset_id', datasetId);
+
+  console.log('[SatQuery Client] Dispatching query:', {
+    query: query.slice(0, 80),
+    filesCount: fileArray.length,
+    t1: t1Filename || fileArray[0]?.name || beforeFile?.name,
+    t2: t2Filename || fileArray[1]?.name || afterFile?.name,
+    datasetName,
+    datasetId,
+  });
 
   return request<SatQueryResponse>(
     '/satquery',
@@ -324,6 +360,9 @@ export interface ImageryUploadResponse {
   t2_image_url?: string | null;
   t1_filename?: string;
   t2_filename?: string | null;
+  band_contract?: BandCapabilityContract;
+  t1_nir_image_url?: string | null;
+  t2_nir_image_url?: string | null;
 }
 
 export function uploadImagery(
@@ -355,6 +394,9 @@ export interface ImageryPreset {
   area_sq_km: number;
   t1_image_url: string;
   t2_image_url?: string | null;
+  band_contract?: BandCapabilityContract;
+  t1_nir_image_url?: string | null;
+  t2_nir_image_url?: string | null;
 }
 
 /**
@@ -364,4 +406,15 @@ export interface ImageryPreset {
  */
 export function fetchImageryPresets(signal?: AbortSignal): Promise<ImageryPreset[]> {
   return request<ImageryPreset[]>('/imagery/presets', { method: 'GET' }, { signal, timeoutMs: 8000 });
+}
+
+export function fetchImageryCapabilities(
+  datasetName: string,
+  signal?: AbortSignal
+): Promise<BandCapabilityContract> {
+  return request<BandCapabilityContract>(
+    `/imagery/capabilities?dataset_name=${encodeURIComponent(datasetName)}`,
+    { method: 'GET' },
+    { signal, timeoutMs: 8000 }
+  );
 }

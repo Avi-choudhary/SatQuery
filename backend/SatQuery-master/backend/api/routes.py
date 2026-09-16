@@ -5,7 +5,7 @@ import base64
 import math
 import time
 from pathlib import Path
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
 from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
@@ -45,41 +45,124 @@ ALLOWED_EXTENSIONS = {
 }
 
 
-def _resolve_target_imagery(dataset_name: Optional[str] = None) -> List[str]:
-    search_dirs = [d for d in CANDIDATE_SEARCH_DIRS if d.exists()]
+DATASET_REGISTRY: dict = {}
 
-    if isinstance(dataset_name, str) and dataset_name.strip() and dataset_name.strip().lower() not in ["uploaded scene", "none", "null"]:
-        clean = dataset_name.strip()
+
+def _resolve_target_imagery(
+    dataset_name: Optional[str] = None,
+    t1_filename: Optional[str] = None,
+    t2_filename: Optional[str] = None,
+    dataset_id: Optional[str] = None,
+) -> List[str]:
+    search_dirs = [d for d in CANDIDATE_SEARCH_DIRS if d.exists()]
+    # Also include any existing aligned subdirectories
+    extended_search_dirs = list(search_dirs)
+    for sdir in search_dirs:
+        aligned_dir = sdir / "aligned"
+        if aligned_dir.exists() and aligned_dir.is_dir():
+            extended_search_dirs.append(aligned_dir)
+
+    def _clean_str(val: Any) -> Optional[str]:
+        if isinstance(val, str) and val.strip() and val.strip().lower() not in ["none", "null", "undefined", "uploaded scene"]:
+            return val.strip()
+        return None
+
+    c_dataset_name = _clean_str(dataset_name)
+    c_t1 = _clean_str(t1_filename)
+    c_t2 = _clean_str(t2_filename)
+    c_ds_id = _clean_str(dataset_id)
+
+    def _find_file(filename: Optional[str]) -> Optional[str]:
+        clean_name = _clean_str(filename)
+        if not clean_name:
+            return None
+        for sdir in extended_search_dirs:
+            p = sdir / clean_name
+            if p.exists() and p.is_file():
+                return str(p)
+        clean_stem = Path(clean_name).stem.lower()
+        for sdir in extended_search_dirs:
+            for f in sdir.iterdir():
+                if f.is_file() and not f.name.startswith("prev_") and not f.name.startswith("."):
+                    if f.name.lower() == clean_name.lower() or f.stem.lower() == clean_stem:
+                        return str(f)
+        return None
+
+    # 1. Resolve by dataset_id from server registry
+    if c_ds_id and c_ds_id in DATASET_REGISTRY:
+        reg_paths = [p for p in DATASET_REGISTRY[c_ds_id] if os.path.exists(p)]
+        if reg_paths:
+            print(f"[SatQuery API] Resolved {len(reg_paths)} file(s) via dataset_id '{c_ds_id}' from registry")
+            return reg_paths
+
+    # 2. Resolve by explicit t1_filename and t2_filename
+    if c_t1 and c_t2:
+        t1_found = _find_file(c_t1)
+        t2_found = _find_file(c_t2)
+        if t1_found and t2_found:
+            print(f"[SatQuery API] Resolved bi-temporal pair from t1/t2 filenames: T1='{t1_found}', T2='{t2_found}'")
+            return [t1_found, t2_found]
+        if t1_found:
+            return [t1_found]
+
+    if c_t1 and not c_t2:
+        t1_found = _find_file(c_t1)
+        if t1_found:
+            return [t1_found]
+
+    # 3. Resolve by dataset_name
+    if c_dataset_name:
+        clean = c_dataset_name
         clean_lower = clean.lower()
 
+        # Check registry by dataset_name
+        if clean in DATASET_REGISTRY:
+            reg_paths = [p for p in DATASET_REGISTRY[clean] if os.path.exists(p)]
+            if reg_paths:
+                print(f"[SatQuery API] Resolved {len(reg_paths)} file(s) for '{clean}' from registry")
+                return reg_paths
+
+        # Composite delimiter support: e.g. "t1.tif:::t2.tif" or "t1.tif,t2.tif"
+        if ":::" in clean or "|||" in clean or ("," in clean and not clean.endswith(",")):
+            sep = ":::" if ":::" in clean else "|||" if "|||" in clean else ","
+            parts = [p.strip() for p in clean.split(sep) if p.strip()]
+            if len(parts) >= 2:
+                p1 = _find_file(parts[0])
+                p2 = _find_file(parts[1])
+                if p1 and p2:
+                    print(f"[SatQuery API] Resolved bi-temporal pair from composite name: T1='{p1}', T2='{p2}'")
+                    return [p1, p2]
+
+        # Preset bi-temporal check: Bengaluru
         if "bengaluru" in clean_lower and ("t1_t2" in clean_lower or "pair" in clean_lower or "urban" in clean_lower):
-            for sdir in search_dirs:
+            for sdir in extended_search_dirs:
                 t1 = sdir / "Bengaluru_T1_Pre.png"
                 t2 = sdir / "Bengaluru_T2_Post.png"
                 if t1.exists() and t2.exists():
+                    print(f"[SatQuery API] Resolved Bengaluru preset pair: T1='{t1}', T2='{t2}'")
                     return [str(t1), str(t2)]
 
+        # Preset bi-temporal check: Delhi
         if "delhi" in clean_lower and ("pair" in clean_lower or "temporal" in clean_lower or "change" in clean_lower):
-            for sdir in search_dirs:
+            for sdir in extended_search_dirs:
+                # Check normal names
                 t1 = sdir / "east_delhi_2018_S2.tif"
                 t2 = sdir / "delhi_20260112_S2.tif"
                 if t1.exists() and t2.exists():
+                    print(f"[SatQuery API] Resolved Delhi preset pair: T1='{t1}', T2='{t2}'")
                     return [str(t1), str(t2)]
+                # Check aligned names
+                t1_a = sdir / "aligned_east_delhi_2018_S2.tif"
+                t2_a = sdir / "aligned_delhi_20260112_S2.tif"
+                if t1_a.exists() and t2_a.exists():
+                    print(f"[SatQuery API] Resolved Delhi aligned preset pair: T1='{t1_a}', T2='{t2_a}'")
+                    return [str(t1_a), str(t2_a)]
 
-        for sdir in search_dirs:
-            cand = sdir / clean
-            if cand.exists() and cand.is_file():
-                return [str(cand)]
+        found = _find_file(clean)
+        if found:
+            return [found]
 
-        clean_stem = Path(clean).stem.lower()
-        for sdir in search_dirs:
-            for f in sdir.iterdir():
-                if f.name.startswith("prev_"):
-                    continue
-                if f.name.lower() == clean_lower or f.stem.lower() == clean_stem:
-                    if f.is_file():
-                        return [str(f)]
-
+    # Fallback to newest valid imagery in search directories
     for sdir in search_dirs:
         candidates = []
         for f in sdir.iterdir():
@@ -107,6 +190,9 @@ async def handle_satquery(
     files: Optional[List[UploadFile]] = File(None),
     before_file: Optional[UploadFile] = File(None),
     after_file: Optional[UploadFile] = File(None),
+    t1_filename: Optional[str] = Form(None),
+    t2_filename: Optional[str] = Form(None),
+    dataset_id: Optional[str] = Form(None),
     dataset_name: Optional[str] = Form(None),
     conversation_id: Optional[str] = Form(None),
     current_user: Optional[User] = Depends(get_optional_current_user),
@@ -117,6 +203,9 @@ async def handle_satquery(
             status_code=400,
             detail="Query cannot be empty.",
         )
+
+    print(f"\n[FRONTEND QUERY] received = '{query.strip()}'")
+    print(f"[BACKEND QUERY] active_query = '{query.strip()}'\n")
 
     # 1. Resolve or create user-owned conversation if authenticated
     conv = None
@@ -159,37 +248,64 @@ async def handle_satquery(
 
     saved_paths: List[str] = []
 
+    def _save_upload(upload: Optional[UploadFile]) -> Optional[str]:
+        if upload is not None and hasattr(upload, "filename") and bool(upload.filename) and hasattr(upload, "file"):
+            suffix = Path(upload.filename).suffix.lower()
+            if suffix not in ALLOWED_EXTENSIONS:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Unsupported file type: {suffix}. Supported: {', '.join(ALLOWED_EXTENSIONS)}",
+                )
+            dest = TEMP_DIR / f"{uuid.uuid4().hex}_{upload.filename}"
+            with dest.open("wb") as out:
+                shutil.copyfileobj(upload.file, out)
+            return str(dest)
+        return None
+
     try:
-        if files and isinstance(files, (list, tuple)):
-            for upload in files:
-                if hasattr(upload, "filename") and bool(upload.filename) and hasattr(upload, "file"):
-                    suffix = Path(upload.filename).suffix.lower()
-                    if suffix not in ALLOWED_EXTENSIONS:
-                        raise HTTPException(
-                            status_code=400,
-                            detail=f"Unsupported file type: {suffix}. Supported: {', '.join(ALLOWED_EXTENSIONS)}",
-                        )
-                    dest = TEMP_DIR / f"{uuid.uuid4().hex}_{upload.filename}"
-                    with dest.open("wb") as out:
-                        shutil.copyfileobj(upload.file, out)
-                    saved_paths.append(str(dest))
+        file_count_in = len(files) if (files and isinstance(files, (list, tuple))) else (1 if files else 0)
+        print(
+            f"[SatQuery API] /satquery incoming: files_count={file_count_in}, "
+            f"before_file={'yes' if before_file else 'no'}, after_file={'yes' if after_file else 'no'}, "
+            f"dataset_name='{dataset_name}', t1_filename='{t1_filename}', t2_filename='{t2_filename}', "
+            f"dataset_id='{dataset_id}'"
+        )
 
-        for upload in [before_file, after_file]:
-            if hasattr(upload, "filename") and bool(upload.filename) and hasattr(upload, "file"):
-                suffix = Path(upload.filename).suffix.lower()
-                if suffix not in ALLOWED_EXTENSIONS:
-                    raise HTTPException(
-                        status_code=400,
-                        detail=f"Unsupported file type: {suffix}. Supported: {', '.join(ALLOWED_EXTENSIONS)}",
-                    )
-                dest = TEMP_DIR / f"{uuid.uuid4().hex}_{upload.filename}"
-                with dest.open("wb") as out:
-                    shutil.copyfileobj(upload.file, out)
-                saved_paths.append(str(dest))
+        # 1. Prioritize explicit before_file (T1) and after_file (T2)
+        b_path = _save_upload(before_file)
+        a_path = _save_upload(after_file)
+        if b_path and a_path:
+            saved_paths = [b_path, a_path]
+        elif b_path:
+            saved_paths = [b_path]
+        elif a_path:
+            saved_paths = [a_path]
 
+        # 2. Check files list if before/after not both specified
+        if not saved_paths and files:
+            file_list = files if isinstance(files, (list, tuple)) else [files]
+            for upload in file_list:
+                p = _save_upload(upload)
+                if p:
+                    saved_paths.append(p)
+
+        # 3. If no files were uploaded in this turn, resolve from dataset_id, t1/t2 filenames, or dataset_name
         clean_dataset_name = dataset_name if isinstance(dataset_name, str) else None
+        clean_t1 = t1_filename if isinstance(t1_filename, str) else None
+        clean_t2 = t2_filename if isinstance(t2_filename, str) else None
+        clean_ds_id = dataset_id if isinstance(dataset_id, str) else None
         if not saved_paths:
-            saved_paths = _resolve_target_imagery(clean_dataset_name)
+            saved_paths = _resolve_target_imagery(
+                dataset_name=clean_dataset_name,
+                t1_filename=clean_t1,
+                t2_filename=clean_t2,
+                dataset_id=clean_ds_id,
+            )
+
+        print(f"[SatQuery API] /satquery resolved {len(saved_paths)} image(s) for execution:")
+        for i, p in enumerate(saved_paths):
+            tag = "T1 (Earlier / Before)" if i == 0 and len(saved_paths) >= 2 else "T2 (Later / After)" if i == 1 and len(saved_paths) >= 2 else f"Image {i+1}"
+            print(f"  -> [{tag}]: {p}")
 
         if not saved_paths:
             raise HTTPException(
@@ -236,6 +352,16 @@ async def handle_satquery(
 
             res.conversation_id = conv.id
 
+        if saved_paths:
+            try:
+                from services.band_service import build_band_capability_contract
+                res.band_contract = build_band_capability_contract(
+                    saved_paths[0],
+                    saved_paths[1] if len(saved_paths) > 1 else None
+                )
+            except Exception:
+                pass
+
         return res
 
     except HTTPException:
@@ -258,6 +384,9 @@ async def handle_satquery_json(
             status_code=400,
             detail="Query cannot be empty.",
         )
+
+    print(f"\n[FRONTEND QUERY] received (JSON) = '{req.query.strip()}'")
+    print(f"[BACKEND QUERY] active_query (JSON) = '{req.query.strip()}'\n")
 
     # 1. Resolve or create user-owned conversation if authenticated
     conv = None
@@ -356,6 +485,16 @@ async def handle_satquery_json(
             db.commit()
 
             res.conversation_id = conv.id
+
+        if saved_paths:
+            try:
+                from services.band_service import build_band_capability_contract
+                res.band_contract = build_band_capability_contract(
+                    saved_paths[0],
+                    saved_paths[1] if len(saved_paths) > 1 else None
+                )
+            except Exception:
+                pass
 
         return res
 
@@ -476,13 +615,33 @@ async def upload_imagery(
         sensor_name = sensor_type or info_t1.get("sensor", "Sentinel-2 (Optical)")
         mode_val = "bi-temporal" if len(saved_paths) > 1 else "single"
         cache_bust = int(time.time())
+        ds_id = f"ds_{cache_bust}"
+        t1_fn = os.path.basename(saved_paths[0])
+        t2_fn = os.path.basename(saved_paths[1]) if len(saved_paths) > 1 else None
+
+        # Save into DATASET_REGISTRY for lookup in follow-up queries without re-uploading
+        DATASET_REGISTRY[ds_id] = saved_paths
+        DATASET_REGISTRY[t1_fn] = saved_paths
+        if t2_fn:
+            DATASET_REGISTRY[f"{t1_fn}:::{t2_fn}"] = saved_paths
+
+        comp_name = f"{t1_fn}:::{t2_fn}" if t2_fn else t1_fn
+        print(f"[SatQuery API] /imagery/upload saved {len(saved_paths)} image(s). Registered as '{ds_id}' and '{comp_name}'")
+
+        from services.band_service import build_band_capability_contract
+        t1_path = saved_paths[0]
+        t2_path = saved_paths[1] if len(saved_paths) > 1 else None
+        band_contract = build_band_capability_contract(t1_path, t2_path)
 
         # Preview URLs are returned as origin-relative paths. An absolute
         # http://localhost:8000 URL only resolves on the machine running this
         # server, so it broke every client on the LAN and any dev-server proxy.
+        t1_nir_url = f"/static/{overlay_t1['png_nir_name']}?t={cache_bust}" if (overlay_t1 and overlay_t1.get("png_nir_name")) else None
+        t2_nir_url = f"/static/{overlay_t2['png_nir_name']}?t={cache_bust}" if (overlay_t2 and overlay_t2.get("png_nir_name")) else None
+
         return {
-            "dataset_id": f"ds_{cache_bust}",
-            "name": os.path.basename(saved_paths[0]),
+            "dataset_id": ds_id,
+            "name": comp_name,
             "sensor": sensor_name,
             "mode": mode_val,
             "georeferenced": georeferenced,
@@ -494,16 +653,47 @@ async def upload_imagery(
             ),
             "area_sq_km": area_km,
             "t1_image_url": f"/static/{prev_t1}?t={cache_bust}",
+            "t1_nir_image_url": t1_nir_url,
             "t2_image_url": f"/static/{prev_t2}?t={cache_bust}" if prev_t2 else None,
-            "t1_filename": os.path.basename(saved_paths[0]),
-            "t2_filename": os.path.basename(saved_paths[1]) if len(saved_paths) > 1 else None,
+            "t2_nir_image_url": t2_nir_url,
+            "t1_filename": t1_fn,
+            "t2_filename": t2_fn,
+            "band_contract": band_contract,
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Imagery ingestion error: {str(e)}")
 
 
+@router.get("/imagery/capabilities")
+def get_imagery_capabilities(
+    dataset_name: Optional[str] = None,
+    t1: Optional[str] = None,
+    t2: Optional[str] = None,
+    dataset_id: Optional[str] = None,
+):
+    from services.band_service import build_band_capability_contract
+    paths = _resolve_target_imagery(dataset_name=dataset_name, t1_filename=t1, t2_filename=t2, dataset_id=dataset_id)
+    if not paths:
+        raise HTTPException(status_code=404, detail="Imagery not found for capability evaluation.")
+    t1_p = paths[0]
+    t2_p = paths[1] if len(paths) > 1 else None
+    return build_band_capability_contract(t1_p, t2_p)
+
+
 @router.get("/imagery/presets")
 def get_imagery_presets():
+    from services.band_service import build_band_capability_contract
+
+    # Evaluate Delhi preset
+    t1_delhi = TEMP_DIR / "east_delhi_2018_S2.tif"
+    t2_delhi = TEMP_DIR / "east.tif"
+    delhi_contract = build_band_capability_contract(t1_delhi, t2_delhi) if t1_delhi.exists() else None
+    t1_delhi_nir = "/static/nir_web_east_delhi_2018_S2.png" if (TEMP_DIR / "nir_web_east_delhi_2018_S2.png").exists() else None
+
+    # Evaluate single Delhi S2
+    s2_delhi = TEMP_DIR / "delhi_20260112_S2.tif"
+    s2_contract = build_band_capability_contract(s2_delhi) if s2_delhi.exists() else None
+
     return [
         {
             "id": "delhi_temporal",
@@ -517,7 +707,10 @@ def get_imagery_presets():
             "resolution": "10.0m GSD",
             "area_sq_km": 124.5,
             "t1_image_url": "/static/prev_east_delhi_2018_S2.png",
+            "t1_nir_image_url": t1_delhi_nir,
             "t2_image_url": "/static/prev_delhi_20260112_S2.png",
+            "t2_nir_image_url": None,
+            "band_contract": delhi_contract,
         },
         {
             "id": "delhi_s2",
@@ -531,6 +724,8 @@ def get_imagery_presets():
             "resolution": "10.0m GSD",
             "area_sq_km": 1050.4,
             "t1_image_url": "/static/prev_delhi_20260112_S2.png",
+            "t1_nir_image_url": None,
+            "band_contract": s2_contract,
         },
         {
             "id": "bengaluru_urban_pair",
