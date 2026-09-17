@@ -345,9 +345,9 @@ export const HistoryPanel: React.FC = () => {
         <button
           type="button"
           onClick={startNew}
-          className="flex min-w-0 flex-1 cursor-pointer items-center gap-2 rounded-lg px-2 py-1.5 text-[13px] text-ink transition-colors hover:bg-surface-2"
+          className="flex min-w-0 flex-1 cursor-pointer items-center justify-center gap-2 rounded-lg bg-accent px-3 py-1.5 text-[13px] font-semibold text-space-black shadow-[0_1px_0_0_rgba(255,255,255,0.14)_inset] transition-colors hover:bg-accent/90 active:bg-accent/80"
         >
-          <SquarePen size={14} className="shrink-0 text-accent" aria-hidden />
+          <SquarePen size={14} className="shrink-0" aria-hidden />
           New conversation
         </button>
 
