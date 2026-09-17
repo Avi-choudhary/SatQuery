@@ -2,6 +2,7 @@ import React from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { cn } from '../../lib/utils';
+import { PieChart } from '../ui/PieChart';
 
 interface MarkdownContentProps {
   content: string;
@@ -88,6 +89,20 @@ export const MarkdownContent: React.FC<MarkdownContentProps> = ({
           code: ({ node, className: codeClassName, children, ...props }: any) => {
             const match = /language-(\w+)/.exec(codeClassName || '');
             const isBlock = Boolean(match) || (typeof children === 'string' && children.includes('\n'));
+            
+            if (match && match[1] === 'pie') {
+              try {
+                const data = JSON.parse(String(children));
+                return <PieChart data={data} />;
+              } catch (e) {
+                return (
+                  <div className="my-2.5 rounded-xl border border-danger/25 bg-danger/10 p-3 text-[12px] text-danger">
+                    Failed to render pie chart: Invalid JSON data.
+                  </div>
+                );
+              }
+            }
+
             if (isBlock) {
               return (
                 <div className="my-2.5 overflow-x-auto rounded-xl border border-line bg-surface-3 p-3 font-mono text-[12px] text-ink scrollbar-slim">

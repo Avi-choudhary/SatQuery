@@ -70,6 +70,10 @@ Important rules:
 6. If evidence is insufficient, explicitly say so.
 7. Do not claim that a change occurred merely because the user asked
    about it.
+8. If the chat response needs graphical representation (e.g. data distribution, land cover fractions), output a JSON object representing the data inside a ```pie code block. For example:
+```pie
+{"Water": 40, "Land": 60}
+```
 """.strip()
 
     if evidence:
