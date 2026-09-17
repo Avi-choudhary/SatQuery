@@ -2008,6 +2008,86 @@ def _save_mask_web_overlay(
         return None
 
 
+def _save_heatmap_web_overlay(
+    magnitude: np.ndarray,
+    valid: np.ndarray,
+    transform: Affine,
+    crs: CRS,
+    output_path: Path,
+) -> Optional[Dict[str, Any]]:
+    """
+    Write the change magnitude as an RGBA PNG heatmap warped to Web Mercator.
+    """
+    try:
+        from PIL import Image
+
+        height, width = magnitude.shape
+        rgba = np.zeros((height, width, 4), dtype=np.uint8)
+
+        # Normalize magnitude 0 to 1 for the heatmap
+        finite_mag = magnitude[valid & np.isfinite(magnitude)]
+        if finite_mag.size > 0:
+            low = np.percentile(finite_mag, 2)
+            high = np.percentile(finite_mag, 98)
+            if high > low:
+                norm = np.clip((magnitude - low) / (high - low), 0.0, 1.0)
+            else:
+                norm = np.zeros_like(magnitude)
+        else:
+            norm = np.zeros_like(magnitude)
+
+        hit = valid & (norm > 0)
+
+        # Simple colormap: Blue -> Green -> Red
+        rgba[..., 0][hit] = np.clip(norm[hit] * 2 * 255, 0, 255).astype(np.uint8)
+        rgba[..., 1][hit] = np.clip((1.0 - np.abs(norm[hit] - 0.5) * 2) * 255, 0, 255).astype(np.uint8)
+        rgba[..., 2][hit] = np.clip((1.0 - norm[hit] * 2) * 255, 0, 255).astype(np.uint8)
+        rgba[..., 3][hit] = np.clip(norm[hit] * 200 + 55, 0, 255).astype(np.uint8)
+
+        dst_transform, dst_width, dst_height = calculate_default_transform(
+            crs, "EPSG:3857", width, height, *rasterio.transform.array_bounds(
+                height, width, transform
+            )
+        )
+
+        warped = np.zeros((4, dst_height, dst_width), dtype=np.uint8)
+        for band in range(4):
+            reproject(
+                source=rgba[..., band],
+                destination=warped[band],
+                src_transform=transform,
+                src_crs=crs,
+                dst_transform=dst_transform,
+                dst_crs="EPSG:3857",
+                resampling=Resampling.nearest,
+            )
+
+        Image.fromarray(
+            np.transpose(warped, (1, 2, 0)), mode="RGBA"
+        ).save(str(output_path), "PNG")
+
+        left, top = dst_transform * (0, 0)
+        right, bottom = dst_transform * (dst_width, dst_height)
+        transformer = Transformer.from_crs("EPSG:3857", "EPSG:4326", always_xy=True)
+        min_lon, min_lat = transformer.transform(left, bottom)
+        max_lon, max_lat = transformer.transform(right, top)
+
+        return {
+            "wgs84_bounds": [
+                round(float(min_lon), 8),
+                round(float(min_lat), 8),
+                round(float(max_lon), 8),
+                round(float(max_lat), 8),
+            ],
+            "width": int(dst_width),
+            "height": int(dst_height),
+        }
+
+    except Exception as exc:
+        print(f"[Heatmap overlay warning]: {type(exc).__name__}: {exc}")
+        return None
+
+
 def _save_mask_raster(
     mask: np.ndarray,
     transform: Affine,
@@ -2902,6 +2982,20 @@ def _analyse_pair(
             mask_overlay_path,
         )
 
+        # Browser-drawable heatmap of the magnitude.
+        heatmap_overlay_path = (
+            output_folder
+            / "change_heatmap_web.png"
+        )
+
+        heatmap_overlay = _save_heatmap_web_overlay(
+            magnitude,
+            valid,
+            grid["transform"],
+            grid["crs"],
+            heatmap_overlay_path,
+        )
+
         _save_magnitude_raster(
             magnitude,
             grid["transform"],
@@ -3176,6 +3270,22 @@ def _analyse_pair(
             tracer.append_log(
                 "step 15.1: wrote Web-Mercator change-mask overlay "
                 f"({mask_overlay['width']}x{mask_overlay['height']} px)"
+            )
+
+        if heatmap_overlay is not None:
+            relative_hm = heatmap_overlay_path.relative_to(OUTPUT_DIR.parent).as_posix()
+            evidence.append(
+                {
+                    "type": "ImageOverlay",
+                    "label": "Change Heatmap",
+                    "url": f"/static/outputs/{relative_hm}",
+                    "wgs84_bounds": heatmap_overlay["wgs84_bounds"],
+                    "opacity": 0.7,
+                }
+            )
+            tracer.append_log(
+                "step 15.2: wrote Web-Mercator change-heatmap overlay "
+                f"({heatmap_overlay['width']}x{heatmap_overlay['height']} px)"
             )
 
         evidence.extend(
