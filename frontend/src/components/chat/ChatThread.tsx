@@ -143,9 +143,15 @@ export const ChatThread: React.FC = () => {
     pinnedRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 120;
   };
 
+  const prevMessagesLength = useRef(messages.length);
+
   useEffect(() => {
-    if (pinnedRef.current) {
+    const isNewMessage = messages.length > prevMessagesLength.current;
+    prevMessagesLength.current = messages.length;
+
+    if (isNewMessage || pinnedRef.current) {
       bottomRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
+      pinnedRef.current = true;
     }
   }, [messages, isBusy]);
 
