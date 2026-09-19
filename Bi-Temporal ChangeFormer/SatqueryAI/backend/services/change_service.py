@@ -3344,11 +3344,27 @@ async def run_inference(
             tracer,
         )
 
+        answer, evidence = result
+
+        if "[Instruction:" in query:
+            try:
+                from services.qwen_service import run_inference as qwen_infer
+                translation_query = (
+                    f"{query}\n\nTask: Translate the following analysis result into the requested language.\n"
+                    f"Result to translate: '{answer}'"
+                )
+                translated_answer, _ = await qwen_infer(translation_query, [file_paths[0]], tracer)
+                if translated_answer:
+                    answer = translated_answer
+                    tracer.append_log("Translated answer to requested language")
+            except Exception as e:
+                tracer.append_log(f"Translation failed: {e}")
+
         tracer.append_log(
             "Change Detective completed successfully"
         )
 
-        return result
+        return (answer, evidence)
 
     except Exception as exc:
 
