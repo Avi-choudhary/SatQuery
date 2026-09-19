@@ -2027,21 +2027,30 @@ def _save_heatmap_web_overlay(
         # Normalize magnitude 0 to 1 for the heatmap
         finite_mag = magnitude[valid & np.isfinite(magnitude)]
         if finite_mag.size > 0:
-            low = np.percentile(finite_mag, 2)
-            high = np.percentile(finite_mag, 98)
+            import scipy.ndimage
+            
+            # Apply Gaussian blur to create a smooth, glowing density heatmap
+            # instead of just isolated colored pixels
+            blurred_mag = scipy.ndimage.gaussian_filter(magnitude, sigma=8.0)
+            
+            valid_blurred = blurred_mag[valid]
+            low = np.percentile(valid_blurred, 5)
+            high = np.percentile(valid_blurred, 99.5)
+            
             if high > low:
-                norm = np.clip((magnitude - low) / (high - low), 0.0, 1.0)
+                norm = np.clip((blurred_mag - low) / (high - low), 0.0, 1.0)
             else:
-                norm = np.zeros_like(magnitude)
+                norm = np.zeros_like(blurred_mag)
         else:
             norm = np.zeros_like(magnitude)
 
-        hit = valid & (norm > 0)
+        # Only draw pixels where the glow is somewhat visible
+        hit = valid & (norm > 0.05)
 
-        # Simple colormap: Blue -> Green -> Red
-        rgba[..., 0][hit] = np.clip(norm[hit] * 2 * 255, 0, 255).astype(np.uint8)
-        rgba[..., 1][hit] = np.clip((1.0 - np.abs(norm[hit] - 0.5) * 2) * 255, 0, 255).astype(np.uint8)
-        rgba[..., 2][hit] = np.clip((1.0 - norm[hit] * 2) * 255, 0, 255).astype(np.uint8)
+        # Better colormap: Dark Blue -> Cyan -> Yellow -> Red
+        rgba[..., 0][hit] = np.clip(norm[hit] * 255, 0, 255).astype(np.uint8)
+        rgba[..., 1][hit] = np.clip((1.0 - np.abs(norm[hit] - 0.75) * 2) * 255, 0, 255).astype(np.uint8)
+        rgba[..., 2][hit] = np.clip((1.0 - norm[hit]) * 255, 0, 255).astype(np.uint8)
         rgba[..., 3][hit] = np.clip(norm[hit] * 200 + 55, 0, 255).astype(np.uint8)
 
         dst_transform, dst_width, dst_height = calculate_default_transform(
