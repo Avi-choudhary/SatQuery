@@ -313,7 +313,9 @@ export function extractGeoJson(res: SatQueryResponse): any | null {
  * on the right ground at every zoom.
  */
 export function extractImageOverlay(res: SatQueryResponse): ImageOverlayEvidence | null {
-  for (const item of res.visual_evidence ?? []) {
+  const items = res.visual_evidence ?? [];
+  for (let i = items.length - 1; i >= 0; i--) {
+    const item = items[i];
     if (!item || typeof item !== 'object') continue;
     const candidate = item as Record<string, unknown>;
     if (candidate.type !== 'ImageOverlay') continue;
