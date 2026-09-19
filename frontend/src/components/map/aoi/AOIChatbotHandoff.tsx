@@ -10,36 +10,80 @@ import {
 import { useApp } from '../../../context/AppState';
 import {
   type FetchAOIResponse,
+  type FetchBiTemporalAOIResponse,
   aoiResponseToSceneDataset,
   aoiResponseToSceneOverlay,
+  aoiPairResponseToSceneDataset,
+  aoiPairResponseToSceneOverlay,
 } from '../../../lib/interactiveMapApi';
 
 interface AOIChatbotHandoffProps {
-  scene: FetchAOIResponse | null;
+  scene: FetchAOIResponse | FetchBiTemporalAOIResponse | null;
   onDismiss: () => void;
+  onRunChangeFormer?: (scene: FetchBiTemporalAOIResponse) => void;
 }
 
-export const AOIChatbotHandoff: React.FC<AOIChatbotHandoffProps> = ({ scene, onDismiss }) => {
+export const AOIChatbotHandoff: React.FC<AOIChatbotHandoffProps> = ({
+  scene,
+  onDismiss,
+  onRunChangeFormer,
+}) => {
   const navigate = useNavigate();
-  const { setScene, openDock } = useApp();
+  const { setScene, openDock, sendQuery } = useApp();
 
   if (!scene) return null;
 
-  const handleHandoff = () => {
-    const dataset = aoiResponseToSceneDataset(scene);
-    const overlay = aoiResponseToSceneOverlay(scene);
+  const isBiTemporal = 't2_image_url' in scene;
 
-    // Update global state with the authentic fetched scene
-    setScene(dataset, overlay);
+  const handleHandoff = () => {
+    if (isBiTemporal) {
+      const bitemp = scene as FetchBiTemporalAOIResponse;
+      const dataset = aoiPairResponseToSceneDataset(bitemp);
+      const overlay = aoiPairResponseToSceneOverlay(bitemp);
+      setScene(dataset, overlay);
+    } else {
+      const single = scene as FetchAOIResponse;
+      const dataset = aoiResponseToSceneDataset(single);
+      const overlay = aoiResponseToSceneOverlay(single);
+      setScene(dataset, overlay);
+    }
 
     // Switch to Workspace view for conversation with the AI model
     navigate('/console');
     openDock('map');
   };
 
+  const handleChangeFormerAction = () => {
+    if (isBiTemporal) {
+      const bitemp = scene as FetchBiTemporalAOIResponse;
+      if (onRunChangeFormer) {
+        onRunChangeFormer(bitemp);
+      } else {
+        const dataset = aoiPairResponseToSceneDataset(bitemp);
+        const overlay = aoiPairResponseToSceneOverlay(bitemp);
+        setScene(dataset, overlay);
+        navigate('/console');
+        openDock('map');
+        sendQuery(
+          `Run ChangeFormer change detection on this bi-temporal pair (${bitemp.name}) to identify significant surface changes between ${bitemp.t1?.acquisition_date || 'T1'} and ${bitemp.t2?.acquisition_date || 'T2'}.`
+        );
+      }
+    }
+  };
+
   const formattedDate = (() => {
-    if (!scene.acquisition_date) return 'Recent Pass';
-    const d = new Date(scene.acquisition_date);
+    if (isBiTemporal) {
+      const bitemp = scene as FetchBiTemporalAOIResponse;
+      const fmt = (dStr?: string) => {
+        if (!dStr) return 'Pass';
+        const d = new Date(dStr);
+        return isNaN(d.getTime()) ? dStr : d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
+      };
+      return `${fmt(bitemp.t1?.acquisition_date)} → ${fmt(bitemp.t2?.acquisition_date)}`;
+    }
+    const single = scene as FetchAOIResponse;
+    if (!single.acquisition_date) return 'Recent Pass';
+    const d = new Date(single.acquisition_date);
     return isNaN(d.getTime())
       ? 'Recent Pass'
       : d.toLocaleDateString(undefined, {
@@ -47,6 +91,15 @@ export const AOIChatbotHandoff: React.FC<AOIChatbotHandoffProps> = ({ scene, onD
           month: 'short',
           day: 'numeric',
         });
+  })();
+
+  const cloudCoverValue = (() => {
+    if (isBiTemporal) {
+      const bitemp = scene as FetchBiTemporalAOIResponse;
+      return typeof bitemp.t1?.cloud_cover === 'number' ? bitemp.t1.cloud_cover : null;
+    }
+    const single = scene as FetchAOIResponse;
+    return typeof single.cloud_cover === 'number' ? single.cloud_cover : null;
   })();
 
   return (
@@ -74,7 +127,7 @@ export const AOIChatbotHandoff: React.FC<AOIChatbotHandoffProps> = ({ scene, onD
             <div className="flex items-center gap-1.5 mb-1">
               <span className="flex items-center gap-1 text-[11px] font-semibold text-accent font-mono">
                 <CheckCircle2 size={12} />
-                SCENE STREAMED
+                {isBiTemporal ? 'BI-TEMPORAL PAIR READY' : 'SCENE STREAMED'}
               </span>
               <span className="text-line">•</span>
               <span className="text-[11px] text-ink-muted truncate font-mono">
@@ -92,8 +145,8 @@ export const AOIChatbotHandoff: React.FC<AOIChatbotHandoffProps> = ({ scene, onD
                 {formattedDate}
               </span>
               <span>{scene.area_sq_km} km²</span>
-              {typeof scene.cloud_cover === 'number' && !isNaN(scene.cloud_cover) && (
-                <span>Clouds: {scene.cloud_cover.toFixed(1)}%</span>
+              {typeof cloudCoverValue === 'number' && !isNaN(cloudCoverValue) && (
+                <span>Clouds: {cloudCoverValue.toFixed(1)}%</span>
               )}
             </div>
           </div>
@@ -109,20 +162,32 @@ export const AOIChatbotHandoff: React.FC<AOIChatbotHandoffProps> = ({ scene, onD
           </button>
         </div>
 
-        {/* Action Button */}
-        <div className="mt-3 pt-2.5 border-t border-line flex items-center justify-between gap-2">
+        {/* Action Buttons */}
+        <div className="mt-3 pt-2.5 border-t border-line flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-2">
           <span className="text-[11px] text-ink-muted hidden sm:inline">
-            Load this real scene into the AI assistant:
+            {isBiTemporal ? 'Compare on map or detect changes:' : 'Load this real scene into the AI assistant:'}
           </span>
-          <button
-            type="button"
-            onClick={handleHandoff}
-            className="w-full sm:w-auto inline-flex items-center justify-center gap-2 rounded-xl bg-accent px-4 py-2 text-xs font-semibold text-space-black shadow-[0_0_15px_rgba(0,242,255,0.3)] hover:bg-accent/90 transition-all cursor-pointer"
-          >
-            <Bot size={14} />
-            <span>Analyze with SatQuery AI</span>
-            <ArrowRight size={13} />
-          </button>
+          <div className="flex items-center gap-2">
+            {isBiTemporal && (
+              <button
+                type="button"
+                onClick={handleChangeFormerAction}
+                className="flex-1 sm:flex-initial inline-flex items-center justify-center gap-1.5 rounded-xl bg-surface-3 border border-accent/40 px-3 py-2 text-xs font-semibold text-accent hover:bg-surface-4 transition-all cursor-pointer shadow-sm"
+              >
+                <span>Run ChangeFormer V6</span>
+                <ArrowRight size={13} />
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={handleHandoff}
+              className="flex-1 sm:flex-initial inline-flex items-center justify-center gap-2 rounded-xl bg-accent px-4 py-2 text-xs font-semibold text-space-black shadow-[0_0_15px_rgba(0,242,255,0.3)] hover:bg-accent/90 transition-all cursor-pointer"
+            >
+              <Bot size={14} />
+              <span>{isBiTemporal ? 'Workspace Console' : 'Analyze with SatQuery AI'}</span>
+              <ArrowRight size={13} />
+            </button>
+          </div>
         </div>
       </div>
     </div>

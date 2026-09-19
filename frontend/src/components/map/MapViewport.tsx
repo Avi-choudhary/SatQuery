@@ -40,7 +40,10 @@ import { AOIFetchModal } from './aoi/AOIFetchModal';
 import { AOIChatbotHandoff } from './aoi/AOIChatbotHandoff';
 import {
   type FetchAOIResponse,
+  type FetchBiTemporalAOIResponse,
   aoiResponseToSceneOverlay,
+  aoiPairResponseToSceneOverlay,
+  aoiPairResponseToSceneDataset,
 } from '../../lib/interactiveMapApi';
 
 // Feature Flag: Interactive Map AOI Streamer (Phase 2)
@@ -283,7 +286,7 @@ export const MapViewport: React.FC<MapViewportProps> = ({
   resultOverlay = null,
   density = 'full'
 }) => {
-  const { overlay: contextOverlay } = useApp();
+  const { overlay: contextOverlay, setScene, sendQuery, openDock } = useApp();
   const activeOverlay = propOverlay !== undefined ? propOverlay : contextOverlay;
 
   const mapContainerRef = useRef<HTMLDivElement>(null);
@@ -421,7 +424,7 @@ export const MapViewport: React.FC<MapViewportProps> = ({
   const [selectedBbox, setSelectedBbox] = useState<[number, number, number, number] | null>(null);
   const [selectedAreaKm2, setSelectedAreaKm2] = useState<number>(0);
   const [showFetchModal, setShowFetchModal] = useState<boolean>(false);
-  const [fetchedScene, setFetchedScene] = useState<FetchAOIResponse | null>(null);
+  const [fetchedScene, setFetchedScene] = useState<FetchAOIResponse | FetchBiTemporalAOIResponse | null>(null);
 
   // Auto-switch basemap if SAR sensor is provided
   useEffect(() => {
@@ -2191,11 +2194,67 @@ export const MapViewport: React.FC<MapViewportProps> = ({
                   }
                 }
               }}
+              onSuccessBiTemporal={(response) => {
+                setShowFetchModal(false);
+                setFetchedScene(response);
+                const newDataset = aoiPairResponseToSceneDataset(response);
+                const newOverlay = aoiPairResponseToSceneOverlay(response);
+                setScene(newDataset, newOverlay);
+                setTemporalMode('swipe');
+                setTemporalSlider(50);
+                if (mapRef.current && newOverlay.bounds && newOverlay.bounds.length === 4) {
+                  const [minLng, minLat, maxLng, maxLat] = newOverlay.bounds;
+                  if (
+                    typeof minLng === 'number' && !isNaN(minLng) &&
+                    typeof minLat === 'number' && !isNaN(minLat) &&
+                    typeof maxLng === 'number' && !isNaN(maxLng) &&
+                    typeof maxLat === 'number' && !isNaN(maxLat) &&
+                    Math.abs(minLat) <= 90 && Math.abs(maxLat) <= 90
+                  ) {
+                    try {
+                      mapRef.current.fitBounds(
+                        [
+                          [minLng, minLat],
+                          [maxLng, maxLat],
+                        ],
+                        { padding: 80, duration: 1800 }
+                      );
+                    } catch (fitErr) {
+                      console.warn('Could not fitBounds to bi-temporal overlay:', fitErr);
+                    }
+                  }
+                }
+              }}
+              onRunChangeFormer={(response) => {
+                setShowFetchModal(false);
+                setFetchedScene(response);
+                const newDataset = aoiPairResponseToSceneDataset(response);
+                const newOverlay = aoiPairResponseToSceneOverlay(response);
+                setScene(newDataset, newOverlay);
+                setTemporalMode('swipe');
+                setTemporalSlider(50);
+                openDock('map');
+                sendQuery(
+                  `Run ChangeFormer change detection on this bi-temporal pair (${response.name}) to identify significant surface changes between ${response.t1?.acquisition_date || 'T1'} and ${response.t2?.acquisition_date || 'T2'}.`
+                );
+              }}
             />
 
             <AOIChatbotHandoff
               scene={fetchedScene}
               onDismiss={() => setFetchedScene(null)}
+              onRunChangeFormer={(response) => {
+                setFetchedScene(response);
+                const newDataset = aoiPairResponseToSceneDataset(response);
+                const newOverlay = aoiPairResponseToSceneOverlay(response);
+                setScene(newDataset, newOverlay);
+                setTemporalMode('swipe');
+                setTemporalSlider(50);
+                openDock('map');
+                sendQuery(
+                  `Run ChangeFormer change detection on this bi-temporal pair (${response.name}) to identify significant surface changes between ${response.t1?.acquisition_date || 'T1'} and ${response.t2?.acquisition_date || 'T2'}.`
+                );
+              }}
             />
           </>
         )}

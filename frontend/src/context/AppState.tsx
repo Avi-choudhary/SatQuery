@@ -22,6 +22,7 @@ import {
 } from '../lib/api';
 import { parseTrace, sumAreaHa } from '../lib/trace';
 import type {
+  AOITemporalState,
   BackendPhase,
   ChatMessage,
   ImageOverlayEvidence,
@@ -159,6 +160,12 @@ interface AppStateValue {
   overlay: SceneOverlay | null;
   setScene: (dataset: SceneDataset | null, overlay: SceneOverlay | null) => void;
   clearScene: () => void;
+
+  /* AOI bi-temporal analysis state */
+  aoiTemporal: AOITemporalState;
+  setAoiTemporal: (patch: Partial<AOITemporalState>) => void;
+  clearAoiTemporal: () => void;
+  invalidateAoiTemporal: () => void;
 
   /* conversation */
   messages: ChatMessage[];
@@ -299,6 +306,96 @@ export const AppStateProvider: React.FC<{ children: React.ReactNode }> = ({ chil
   const clearScene = useCallback(() => {
     setDataset(null);
     setOverlay(null);
+  }, []);
+
+  /* --- AOI bi-temporal analysis state ------------------------------------ */
+  const [aoiTemporal, setAoiTemporalState] = useState<AOITemporalState>({
+    bbox: null,
+    areaKm2: 0,
+    date1: '',
+    date2: '',
+    sensor: 'sentinel-2',
+    maxCloudCover: 20,
+    t1Scene: null,
+    t2Scene: null,
+    intervalDays: 0,
+    bandContract: null,
+    compatibility: null,
+    isStale: false,
+  });
+
+  const setAoiTemporal = useCallback((patch: Partial<AOITemporalState>) => {
+    setAoiTemporalState((prev) => {
+      // Check invalidation conditions:
+      // If bbox changes, sensor changes, or either date changes: invalidate fetched imagery
+      const bboxChanged = patch.bbox !== undefined && (
+        (!prev.bbox && patch.bbox !== null) ||
+        (prev.bbox && !patch.bbox) ||
+        (prev.bbox && patch.bbox && (
+          patch.bbox[0] !== prev.bbox[0] ||
+          patch.bbox[1] !== prev.bbox[1] ||
+          patch.bbox[2] !== prev.bbox[2] ||
+          patch.bbox[3] !== prev.bbox[3]
+        ))
+      );
+      const sensorChanged = patch.sensor !== undefined && patch.sensor !== prev.sensor;
+      const date1Changed = patch.date1 !== undefined && patch.date1 !== prev.date1;
+      const date2Changed = patch.date2 !== undefined && patch.date2 !== prev.date2;
+
+      let isStale = prev.isStale;
+      let t1Scene = patch.t1Scene !== undefined ? patch.t1Scene : prev.t1Scene;
+      let t2Scene = patch.t2Scene !== undefined ? patch.t2Scene : prev.t2Scene;
+
+      if (bboxChanged || sensorChanged) {
+        t1Scene = null;
+        t2Scene = null;
+        isStale = true;
+      } else if (date1Changed) {
+        t1Scene = null;
+        isStale = true;
+      } else if (date2Changed) {
+        t2Scene = null;
+        isStale = true;
+      }
+
+      if (patch.t1Scene && patch.t2Scene) {
+        isStale = false;
+      }
+
+      return {
+        ...prev,
+        ...patch,
+        t1Scene,
+        t2Scene,
+        isStale,
+      };
+    });
+  }, []);
+
+  const clearAoiTemporal = useCallback(() => {
+    setAoiTemporalState({
+      bbox: null,
+      areaKm2: 0,
+      date1: '',
+      date2: '',
+      sensor: 'sentinel-2',
+      maxCloudCover: 20,
+      t1Scene: null,
+      t2Scene: null,
+      intervalDays: 0,
+      bandContract: null,
+      compatibility: null,
+      isStale: false,
+    });
+  }, []);
+
+  const invalidateAoiTemporal = useCallback(() => {
+    setAoiTemporalState((prev) => ({
+      ...prev,
+      t1Scene: null,
+      t2Scene: null,
+      isStale: true,
+    }));
   }, []);
 
   /* --- conversation ------------------------------------------------------ */
@@ -577,6 +674,10 @@ export const AppStateProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       overlay,
       setScene,
       clearScene,
+      aoiTemporal,
+      setAoiTemporal,
+      clearAoiTemporal,
+      invalidateAoiTemporal,
       messages,
       isBusy,
       sendQuery,
@@ -614,6 +715,10 @@ export const AppStateProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       overlay,
       setScene,
       clearScene,
+      aoiTemporal,
+      setAoiTemporal,
+      clearAoiTemporal,
+      invalidateAoiTemporal,
       messages,
       isBusy,
       sendQuery,
@@ -636,6 +741,7 @@ export const AppStateProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       renameSession,
       deleteSession,
     ]
+
   );
 
   return <AppStateContext.Provider value={value}>{children}</AppStateContext.Provider>;

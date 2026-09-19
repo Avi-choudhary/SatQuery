@@ -108,6 +108,39 @@ export interface SceneDataset {
   bandContract?: BandCapabilityContract;
 }
 
+export interface TemporalSceneMetadata {
+  requestedDate?: string;
+  acquisitionDate?: string;
+  sceneId?: string;
+  sensor?: string;
+  cloudCover?: number | null;
+  bands?: string[];
+  fileSizeMb?: number | null;
+  filename: string;
+  imageUrl: string;
+}
+
+export interface AOITemporalState {
+  bbox: [number, number, number, number] | null;
+  areaKm2: number;
+  date1: string;
+  date2: string;
+  sensor: 'sentinel-2' | 'sentinel-1';
+  maxCloudCover?: number;
+  t1Scene: TemporalSceneMetadata | null;
+  t2Scene: TemporalSceneMetadata | null;
+  intervalDays: number;
+  bandContract?: BandCapabilityContract | null;
+  compatibility?: {
+    compatible: boolean;
+    same_aoi: boolean;
+    same_sensor: boolean;
+    interval_days: number;
+    warnings: string[];
+  } | null;
+  isStale: boolean;
+}
+
 export type MessageRole = 'user' | 'assistant';
 
 export type MessageStatus = 'pending' | 'complete' | 'error' | 'cancelled';

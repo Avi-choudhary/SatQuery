@@ -2,7 +2,7 @@ import os
 import sys
 import re
 from pathlib import Path
-from typing import List
+from typing import List, Optional
 
 from core.tracer import Tracer
 from schemas.responses import SatQueryResponse
@@ -83,6 +83,10 @@ COORD_TERMS = (
     "coordinate of",
     "where is this image",
     "where is this scene",
+    "where is this",
+    "country",
+    "which country",
+    "what country",
     "geographic location",
     "bounding box of this",
     "spatial extent",
@@ -92,8 +96,21 @@ COORD_TERMS = (
     "निर्देशांक",
     "अक्षांश",
     "देशांतर",
-    "स्थान"
+    "स्थान",
+    "देश"
 )
+
+
+def _estimate_country_from_coords(lat: Optional[float], lon: Optional[float]) -> Optional[str]:
+    if lat is None or lon is None:
+        return None
+    if 6.5 <= lat <= 37.5 and 68.0 <= lon <= 97.5:
+        return "India"
+    elif 24.0 <= lat <= 49.5 and -125.0 <= lon <= -66.5:
+        return "United States"
+    elif 36.0 <= lat <= 71.5 and -10.5 <= lon <= 40.5:
+        return "Europe"
+    return None
 
 
 def _contains_term(text: str, term: str) -> bool:
@@ -157,10 +174,10 @@ async def process_query(query: str, file_paths: List[str]) -> SatQueryResponse:
     # Step 2: Intent Classification & Routing
     if plan.intent == "capability_inquiry" or plan.operation in ("index_capability", "inspect_bands") or plan.phenomenon == "band_availability":
         task = "CAPABILITY_INQUIRY"
+    elif _looks_like_coord_query(query) and not any(_contains_term(query, term) for term in CHANGE_TERMS):
+        task = "GEOSPATIAL_METADATA"
     elif _looks_like_change_query(query, file_count):
         task = "CHANGE_DETECTION"
-    elif _looks_like_coord_query(query) and file_count <= 1:
-        task = "GEOSPATIAL_METADATA"
     elif _looks_like_grounding_query(query):
         task = "GROUNDING"
     else:
@@ -195,11 +212,14 @@ async def process_query(query: str, file_paths: List[str]) -> SatQueryResponse:
                 sensor_str = info.get("sensor", "Sentinel-2 (Optical)")
                 res_val = info.get("resolution")
                 res_str = f"{res_val[0]}m" if res_val and isinstance(res_val, list) else "10.0m"
+                country_name = _estimate_country_from_coords(c_lat, c_lon)
 
                 if is_hindi:
+                    country_line = f"• अनुमानित देश / क्षेत्र: {country_name}\n" if country_name else ""
                     text_answer = (
                         f"भौगोलिक निर्देशांक और स्थान सीमा (Spatial Extent):\n\n"
                         f"• केंद्र निर्देशांक (Center): {c_lat:.4f}° N, {c_lon:.4f}° E\n"
+                        f"{country_line}"
                         f"• देशांतर सीमा (Longitude): {min_lon:.4f}° E से {max_lon:.4f}° E\n"
                         f"• अक्षांश सीमा (Latitude): {min_lat:.4f}° N से {max_lat:.4f}° N\n"
                         f"• स्थानिक संदर्भ (CRS): {crs_str}\n"
@@ -208,9 +228,11 @@ async def process_query(query: str, file_paths: List[str]) -> SatQueryResponse:
                         f"इस उपग्रह दृश्य की सीमा रेखा मानचित्र (MapLibre viewport) पर प्रक्षेपित कर दी गई है।"
                     )
                 else:
+                    country_line = f"• Country / Region: {country_name}\n" if country_name else ""
                     text_answer = (
                         f"Geographic Coordinates & Spatial Extent:\n\n"
                         f"• Center Coordinates: {c_lat:.4f}° N, {c_lon:.4f}° E\n"
+                        f"{country_line}"
                         f"• Longitude Range: {min_lon:.4f}° E to {max_lon:.4f}° E\n"
                         f"• Latitude Range: {min_lat:.4f}° N to {max_lat:.4f}° N\n"
                         f"• Spatial Reference (CRS): {crs_str}\n"

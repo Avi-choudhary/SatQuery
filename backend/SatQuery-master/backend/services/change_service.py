@@ -2597,6 +2597,24 @@ def _format_verbalized_answer(
 
     first_bands = first_spectral_bands or {}
     second_bands = second_spectral_bands or {}
+
+    t1_has_nir = bool(first_bands.get("nir") is not None)
+    t2_has_nir = bool(second_bands.get("nir") is not None)
+    t1_has_red = bool(first_bands.get("red") is not None)
+    t2_has_red = bool(second_bands.get("red") is not None)
+    t1_has_green = bool(first_bands.get("green") is not None)
+    t2_has_green = bool(second_bands.get("green") is not None)
+    t1_has_blue = bool(first_bands.get("blue") is not None)
+    t2_has_blue = bool(second_bands.get("blue") is not None)
+    t1_has_swir1 = bool(first_bands.get("swir1") is not None)
+    t2_has_swir1 = bool(second_bands.get("swir1") is not None)
+
+    # Symmetrical bi-temporal band availability flags across both acquisitions
+    has_ndvi_bands = bool(modality == "optical" and t1_has_nir and t2_has_nir and t1_has_red and t2_has_red)
+    has_ndwi_bands = bool(modality == "optical" and t1_has_nir and t2_has_nir and t1_has_green and t2_has_green)
+    has_swir1 = bool(modality == "optical" and t1_has_swir1 and t2_has_swir1)
+    has_swir_bands = bool(modality == "optical" and t1_has_swir1 and t2_has_swir1 and t1_has_nir and t2_has_nir)
+
     criteria = parsed_criteria or {}
     is_filtered = bool(
         criteria.get("top_k")
@@ -4073,14 +4091,15 @@ def _compute_spatial_analysis(
         changeformer_status = (
             "CHANGEFORMER_SKIPPED"
         )
-        changeformer_candidate_fraction = 0.0
+        changeformer_candidate_fraction: float = 0.0
+        explicit_changeformer = "changeformer" in query.lower()
 
         if (
             first_modality == "optical"
-            and feature == "general"
+            and (feature == "general" or explicit_changeformer)
             and band_count >= 3
         ):
-            if gsd > 4.0:
+            if gsd > 4.0 and not explicit_changeformer:
                 changeformer_status = (
                     "CHANGEFORMER_SKIPPED: GSD "
                     f"({gsd:.1f}m) exceeds high-resolution "

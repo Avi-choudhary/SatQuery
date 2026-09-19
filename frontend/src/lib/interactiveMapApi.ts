@@ -117,3 +117,129 @@ export function aoiResponseToSceneOverlay(res: FetchAOIResponse): SceneOverlay {
     t1Filename: res.t1_filename,
   };
 }
+
+export interface FetchBiTemporalAOIRequest {
+  bbox: [number, number, number, number];
+  sensor: 'sentinel-2' | 'sentinel-1';
+  max_cloud_cover?: number;
+  date_t1: string;
+  date_t2: string;
+}
+
+export interface FetchBiTemporalAOIResponse {
+  status: 'success' | 'error' | 'not_found';
+  dataset_id: string;
+  name: string;
+  sensor: string;
+  mode: 'bi-temporal';
+  georeferenced: boolean;
+  wgs84_bounds: [number, number, number, number];
+  center: [number, number];
+  crs: string;
+  resolution: string;
+  area_sq_km: number;
+  interval_days: number;
+  t1_image_url: string;
+  t2_image_url: string;
+  t1_filename: string;
+  t2_filename: string;
+  t1: {
+    requested_date: string;
+    acquisition_date: string;
+    scene_id?: string;
+    cloud_cover?: number | null;
+    bands: string[];
+    file_size_mb?: number | null;
+    filename: string;
+    image_url: string;
+  };
+  t2: {
+    requested_date: string;
+    acquisition_date: string;
+    scene_id?: string;
+    cloud_cover?: number | null;
+    bands: string[];
+    file_size_mb?: number | null;
+    filename: string;
+    image_url: string;
+  };
+  band_contract?: any;
+  compatibility?: {
+    compatible: boolean;
+    same_aoi: boolean;
+    same_sensor: boolean;
+    interval_days: number;
+    warnings: string[];
+  };
+  suggested_queries?: string[];
+}
+
+/**
+ * Streams a bi-temporal pair of satellite scenes for the identical AOI bounding box across two dates.
+ */
+export async function fetchBiTemporalAOIScenes(req: FetchBiTemporalAOIRequest): Promise<FetchBiTemporalAOIResponse> {
+  const res = await fetch(`${API_BASE_URL}/interactive-map/fetch-bitemporal`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(req),
+  });
+
+  if (!res.ok) {
+    let errorDetail = `HTTP ${res.status}`;
+    try {
+      const errJson = await res.json();
+      errorDetail = errJson.detail || errorDetail;
+    } catch {
+      // fallback
+    }
+    throw new Error(errorDetail);
+  }
+
+  const data: FetchBiTemporalAOIResponse = await res.json();
+  return data;
+}
+
+/**
+ * Converts a successful bi-temporal STAC fetch response into a SceneDataset for AppState.
+ */
+export function aoiPairResponseToSceneDataset(res: FetchBiTemporalAOIResponse): SceneDataset {
+  const sizeMb = ((res.t1?.file_size_mb || 0) + (res.t2?.file_size_mb || 0));
+  const areaKm = typeof res.area_sq_km === 'number' && !isNaN(res.area_sq_km) ? res.area_sq_km : 0;
+  return {
+    name: res.name,
+    sizeLabel: sizeMb > 0 ? `${sizeMb.toFixed(1)} MB` : `${areaKm} km²`,
+    sensor: res.sensor,
+    mode: 'bi-temporal',
+    crs: res.crs,
+    resolution: res.resolution,
+    syncedWithBackend: true,
+    georeferenced: true,
+    areaSqKm: areaKm,
+    datasetId: res.dataset_id,
+    t1Filename: res.t1_filename,
+    t2Filename: res.t2_filename,
+    bandContract: res.band_contract,
+  };
+}
+
+/**
+ * Converts a successful bi-temporal STAC fetch response into a SceneOverlay for MapViewport.
+ */
+export function aoiPairResponseToSceneOverlay(res: FetchBiTemporalAOIResponse): SceneOverlay {
+  return {
+    datasetId: res.dataset_id,
+    name: res.name,
+    sensor: res.sensor,
+    mode: 'bi-temporal',
+    bounds: res.wgs84_bounds,
+    center: res.center,
+    crs: res.crs,
+    resolution: res.resolution,
+    areaSqKm: res.area_sq_km,
+    t1ImageUrl: resolveAssetUrl(res.t1_image_url) ?? res.t1_image_url,
+    t2ImageUrl: resolveAssetUrl(res.t2_image_url) ?? res.t2_image_url,
+    t1Filename: res.t1_filename,
+    t2Filename: res.t2_filename,
+    bandContract: res.band_contract,
+  };
+}
