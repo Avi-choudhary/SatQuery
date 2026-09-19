@@ -1,6 +1,6 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
 from pathlib import Path
 
 from api.routes import router
@@ -25,8 +25,12 @@ app.include_router(router, prefix="/api/v1")
 OUTPUTS_DIR = Path(__file__).resolve().parent / "outputs"
 OUTPUTS_DIR.mkdir(exist_ok=True)
 
-# Mount the static directory to serve images like heatmaps
-app.mount("/static/outputs", StaticFiles(directory=str(OUTPUTS_DIR)), name="static_outputs")
+@app.get("/static/outputs/{file_path:path}")
+async def serve_static_outputs(file_path: str):
+    file = OUTPUTS_DIR / file_path
+    if not file.is_file():
+        raise HTTPException(status_code=404, detail="File not found")
+    return FileResponse(str(file))
 
 
 @app.get("/")
