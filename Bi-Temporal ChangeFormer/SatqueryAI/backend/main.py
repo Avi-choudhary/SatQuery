@@ -1,8 +1,9 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+from pathlib import Path
 
 from api.routes import router
-
 
 app = FastAPI(
     title="SatQuery AI",
@@ -19,6 +20,13 @@ app.add_middleware(
 )
 
 app.include_router(router, prefix="/api/v1")
+
+# Ensure outputs directory exists
+OUTPUTS_DIR = Path(__file__).resolve().parent / "outputs"
+OUTPUTS_DIR.mkdir(exist_ok=True)
+
+# Mount the static directory to serve images like heatmaps
+app.mount("/static/outputs", StaticFiles(directory=str(OUTPUTS_DIR)), name="static_outputs")
 
 
 @app.get("/")
