@@ -1,4 +1,4 @@
-import { ChatMessage } from './types';
+import type { ChatMessage } from './types';
 
 export function downloadGeoJsonReport(title: string, messages: ChatMessage[]) {
   // Collect all features from all messages in the session
