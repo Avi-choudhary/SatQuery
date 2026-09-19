@@ -1,5 +1,5 @@
 import React from 'react';
-import { PanelRight, RefreshCcw, SquarePen } from 'lucide-react';
+import { PanelRight, Printer, RefreshCcw, SquarePen } from 'lucide-react';
 import ChatThread from '../components/chat/ChatThread';
 import Composer from '../components/chat/Composer';
 import SceneDock from '../components/scene/SceneDock';
@@ -8,6 +8,7 @@ import { IconButton } from '../components/ui/Button';
 import { LanguageSelector } from '../components/ui/LanguageSelector';
 import { useApp } from '../context/AppState';
 import { describeCompute } from '../lib/api';
+import { printReport } from '../lib/report';
 
 const BackendBadge: React.FC = () => {
   const { backendPhase, backendStatus, backendError, refreshBackend } = useApp();
@@ -48,6 +49,12 @@ const Workspace: React.FC = () => {
   const { dockOpen, setDockOpen, resetConversation, messages, refreshBackend, backendPhase } =
     useApp();
 
+  const handlePrint = () => {
+    // Determine a title for the report based on the first message
+    const title = messages.find(m => m.role === 'user')?.content.substring(0, 60) ?? 'Chat Session';
+    printReport(title, messages);
+  };
+
   return (
     <div className="flex h-full min-h-0">
       <section className="flex min-w-0 flex-1 flex-col">
@@ -65,6 +72,14 @@ const Workspace: React.FC = () => {
                 <RefreshCcw size={13} />
               </IconButton>
             )}
+            <IconButton
+              label="Download report"
+              size="sm"
+              onClick={handlePrint}
+              disabled={messages.length === 0}
+            >
+              <Printer size={13} />
+            </IconButton>
             <IconButton
               label="New conversation"
               size="sm"
